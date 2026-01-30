@@ -62,12 +62,15 @@ void HailoNN::inference(standart_inference_ctx* ctx) {
     log("Trying to inference");
     auto job = infer_model1.run_async(bindings,[&](const hailort::AsyncInferCompletionInfo & info){
         log("Inferenced");
-        free(ctx->input_buffer);
+        // free(ctx->input_buffer);
+        //free(ctx->output_buffer);
         log("input free success");
-        delete[] ctx;
+        
         auto bboxes = parse_nms_data((uint8_t*)ctx->output_buffer, 80);
+
         free(ctx->output_buffer);
-        draw_bounding_boxes(map, bboxes, 1024, 1024, pitch, ctx->proj);
+        draw_bounding_boxes(map, bboxes, 640, 640, pitch, ctx->proj);
+        delete[] ctx;
    
     }).expect("Failed to start async infer job");
     

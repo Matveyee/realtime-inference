@@ -9,6 +9,8 @@ class Queue {
     public:
         std::queue<T> queue_;
         std::mutex self_mutex;
+        std::mutex size_mutex;
+        int size_limit;
         int size;
         Queue();
 
@@ -17,6 +19,10 @@ class Queue {
         T read();
 
         void pop();
+
+        void remove();
+
+        void set_limit(int n);
 
         
 };
@@ -35,15 +41,20 @@ void Queue<T>::push(T item) {
     queue_.push(item);
     size++;
     self_mutex.unlock();
+    // if (size >= size_limit) {
+    //     log("MUTEX: blocked in queue thread");
+    //     size_mutex.lock();
+    // }
 
 }
 
 template <typename T>
 T Queue<T>::read() {
 
-
-    return queue_.front();
-
+    self_mutex.lock();
+    auto ret = queue_.front();
+    self_mutex.unlock();
+    return ret;
 
 }
 
@@ -55,4 +66,22 @@ void Queue<T>::pop() {
     queue_.pop();
     size--;
     self_mutex.unlock();
+    // if (size < size_limit) {
+    //     size_mutex.unlock();
+    // }
 }
+
+template <typename T>
+void Queue<T>::remove() {
+    while (size == 0) {}
+    self_mutex.lock();
+    queue_.pop();
+    size--;
+    self_mutex.unlock();
+}
+
+template <typename T>
+void Queue<T>::set_limit(int n) {
+    size_limit = n;
+}
+

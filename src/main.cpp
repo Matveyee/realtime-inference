@@ -1,6 +1,7 @@
 #include "camera.hpp"
 #include "relay.hpp"
 // #include "../include/modbus.hpp"
+#include "cxxopts.hpp"
 #include "GxIAPI.h"
 #include "DxImageProc.h"
 #include "hailoNN.hpp"
@@ -23,9 +24,12 @@
 
 int WIDTH;
 int HEIGHT;
-int FPS;
+double FPS;
 int sizee;
 std::mutex main_mutex;
+std::mutex capture_mutex;
+std::mutex convert_mutex;
+std::mutex draw_mutex;
 AbstractNNBase* NN = NULL;
 void* context = NULL;
 int stop = 0;
@@ -34,6 +38,7 @@ int cap_index = 0;
 int conv_index = 0;
 int draw_index = 0;
 GPIO gpio;
+cxxopts::ParseResult result;
 auto simple_now() {
     return std::chrono::high_resolution_clock::now();
 }
@@ -79,40 +84,60 @@ class BufferQueueObject {
 
 Queue<FrameBufferQueueObject> queue;
 Queue<BufferQueueObject> pic_queue;
+Queue<BufferQueueObject> infer_queue;
+Queue<FrameBufferQueueObject> free_queue;
 
 void start_inference() {
+    while (true) {
+        STOP
 
+        if (infer_queue.size == 0) {
+        //    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+
+        standart_inference_ctx* ctx = new standart_inference_ctx();
+        ctx->input_buffer = infer_queue.read().data;
+
+        context = ctx;
+        NN->inference(context);
+        infer_queue.pop();
+
+    }
 }
 
 void start_draw() {
     while (true) {
         STOP
-        if (pic_queue.size <= 1) {
-          //  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (pic_queue.size <= 0) {
+        //    std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
         uint8_t* data = pic_queue.read().data;
         drawPicture(data, WIDTH, HEIGHT);
         draw_index++;
-        if (draw_index % 10 == 0)
+        std::cout << "index " << cap_index << std::endl;
+        if (cap_index % 10 == 0){ 
             std::cout << "DELAY: " << cap_index <<"; " << conv_index << "; " << draw_index <<"; "<< cap_index - draw_index << std::endl;
-        pic_queue.pop();
+        }
+
+        infer_queue.push(data);
+        pic_queue.remove();
+        std::cout << "size before" << pic_queue.size << std::endl; 
+        
+        std::cout << "size after" << pic_queue.size << std::endl;
 
         STOP
     }
 }
 void start_convert() {
+    
     while (true) {
         STOP
-        if (queue.size <= 2) {
-         //   std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (queue.size <= 0) {
+          //  std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
-
-        // if (pic_queue.size >= 3) {
-        //     std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        //     continue;
-        // }
         
         std::cout << querystring(RGA_MAX_INPUT) << std::endl;
 
@@ -136,18 +161,20 @@ void start_convert() {
         DX_BAYER_CONVERT_TYPE cvtype
         = RAW2RGB_NEIGHBOUR;
         DX_PIXEL_COLOR_FILTER nBayerType = BAYERRG;
-        bool bFlip = true;
+        bool bFlip = false;
 
         VxInt32 DxStatus = DxRaw8toRGB24(buf->pImgBuf,data,buf->nWidth,
         buf->nHeight,cvtype,nBayerType,bFlip);
+        
+        if (result.count("noresize") == 0) {
 
         uint8_t* dst_buf = (uint8_t*)malloc(WIDTH * HEIGHT * 3);
-        uint8_t* infer_buf = (uint8_t*)malloc(640 * 640 * 3);
         rga_buffer_t src; rga_buffer_t dst;
-         rga_buffer_t infer;
         rga_buffer_handle_t src_handle; rga_buffer_handle_t dst_handle; 
-         rga_buffer_handle_t infer_handle;
+         
+        
 
+        
         src_handle = importbuffer_virtualaddr(data, buf->nWidth, buf->nHeight, RK_FORMAT_RGB_888);
         dst_handle = importbuffer_virtualaddr(dst_buf, WIDTH, HEIGHT, RK_FORMAT_RGB_888);
         
@@ -166,48 +193,46 @@ void start_convert() {
             RK_FORMAT_RGB_888
         );
 
-        
-
-        // src = wrapbuffer_virtualaddr(data, buf->nWidth, buf->nHeight, RK_FORMAT_RGB_888);
-        // dst = wrapbuffer_virtualaddr(dst_buf, WIDTH, HEIGHT, RK_FORMAT_RGB_888);
+    
         
         IM_STATUS STATUS = imresize(src, dst);
-        std::cout << "STATUS : " << STATUS << std::endl;
-
-        infer_handle = importbuffer_virtualaddr(infer_buf, 640, 640, RK_FORMAT_RGB_888);
-
-        infer = wrapbuffer_handle(
-            infer_handle,
-            640,
-            640,
-            RK_FORMAT_RGB_888
-        );
-
-       
-     //   rga_buffer_t infer;
-        //  infer = wrapbuffer_virtualaddr(infer_buf, 640, 640, RK_FORMAT_RGB_888);
-
-        STATUS = imresize(dst, infer);
-        std::cout << "STATUS : " << STATUS << std::endl;
-
-        STATUS = releasebuffer_handle(src_handle);
-        STATUS = releasebuffer_handle(infer_handle);
-        STATUS = releasebuffer_handle(dst_handle);
-
         free(data);
-        //free(infer_buf);
+        STATUS = releasebuffer_handle(src_handle);
+        
+        pic_queue.push(dst_buf);
+        STATUS = releasebuffer_handle(dst_handle);
+        }
+        else {
+            pic_queue.push(data);
+        }  
+       // free(data);
+        // std::cout << "STATUS : " << STATUS << std::endl;
 
-            
+        // uint8_t* infer_buf = (uint8_t*)malloc(640 * 640 * 3);
+        // rga_buffer_handle_t infer_handle;
+        // infer_handle = importbuffer_virtualaddr(infer_buf, 640, 640, RK_FORMAT_RGB_888);
+        // rga_buffer_t infer;
 
+
+        // infer = wrapbuffer_handle(
+        //     infer_handle,
+        //     640,
+        //     640,
+        //     RK_FORMAT_RGB_888
+        // );
+
+
+        // STATUS = imresize(dst, infer);
+        //STATUS = releasebuffer_handle(infer_handle);
+       // STATUS = releasebuffer_handle(dst_handle);
+        
+        // free_queue.push(fbqo);
+        // queue.remove();
         queue.pop();
-        BufferQueueObject bqo(dst_buf);
-        pic_queue.push(dst_buf);       
-        conv_index++; 
-        standart_inference_ctx* ctx = new standart_inference_ctx();
-        ctx->input_buffer = infer_buf;
-
-        context = ctx;
-        NN->inference(context);
+        
+        conv_index++;
+      //  infer_queue.push(infer_buf);
+        
 
         STOP
     }
@@ -215,19 +240,22 @@ void start_convert() {
 
 int count = 0;
 void start_capture(AICamera& cam) {
-    
+    auto start = simple_now();
+    // queue.set_limit(4);
     while (true) {
         STOP
         
-        if (queue.size >= 3) {
-          //  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (queue.size >= 4) {
+            // std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
+            // log("MUTEX: blocked in capture thread");
+            // queue.size_mutex.lock();
         }
-        auto start = simple_now();
+        
         PGX_FRAME_BUFFER pFrameBuffer;
         
         cam.startStream();
-
+        
         cam.getBuffer(&pFrameBuffer);
         std::cout << YELLOW << "Captured" << RESET << std::endl;
         
@@ -239,10 +267,17 @@ void start_capture(AICamera& cam) {
         cap_index++;
         auto end = simple_now();
         Duration dur = end - start;
-
-        std::this_thread::sleep_for(std::chrono::milliseconds( (int)((1.0 / FPS) * 1000) - (int)dur.count()));
-
-
+        start = simple_now();
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds( (int)( (1.0 / FPS) * 1000 - dur.count() ) ) );
+        // if (free_queue.size != 0) {
+        //     free_queue.pop();
+        //     std::cout << "QUEUE ssize: " << queue.size << std::endl;
+        //     std::cout << "PIC ssize: " << pic_queue.size << std::endl;
+        //     std::cout << "INFER ssize: " << infer_queue.size << std::endl;
+        //     std::cout << "FREE ssize: " << free_queue.size << std::endl;
+        // }
+        
         
 
         STOP
@@ -252,7 +287,21 @@ void start_capture(AICamera& cam) {
 
 int main(int argc, char* argv[]) {
 
- //   main_mutex.lock();
+    cxxopts::Options options("app", "options for app");
+
+    options.add_options()
+    ("nr,noresize", "Whether resize or not")
+    ("nds,nodisplay", "Whether display or not")
+    ("ndt,nodetect", "Whether detect or not")
+    ("iw,input-width", "Input width", cxxopts::value<int>()->default_value("640"))
+    ("ih,input-height", "Input height", cxxopts::value<int>()->default_value("640"))
+    ("dw,display-width", "Display width", cxxopts::value<int>()->default_value("640"))
+    ("dh,display-height", "Display height", cxxopts::value<int>()->default_value("640"))
+    ("p,model-path", "Path to .hef model", cxxopts::value<std::string>())
+    ("f,frame-rate", "Input frame-rate", cxxopts::value<int>()->default_value("30"));
+
+    result = options.parse(argc, argv);
+
 
     
     int drm_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
@@ -264,33 +313,52 @@ int main(int argc, char* argv[]) {
     // gpio.init(39);
     signal(SIGINT, sigint_handler);
     AICamera cam;
-    sizee = std::stoi(argv[1]);
-    cam.setHeight(sizee);
-    cam.setWidth(sizee);
-    WIDTH = HEIGHT = std::stoi(argv[2]);
-    FPS = std::stoi(argv[3]);
-    cam.setOffsetX( (2592 - sizee) / 2 );
-    cam.setOffsetY( (1944 - sizee) / 2 );
+    int w = result["input-width"].as<int>();
+    int h = result["input-height"].as<int>();
+    cam.setHeight(w);
+    cam.setWidth(h);
+    if (result.count("noresize") == 0) {
+        WIDTH = result["display-width"].as<int>();
+        HEIGHT = result["display-height"].as<int>();
+    } else {
+        WIDTH = w;
+        HEIGHT = h;
+    }
+    
+    FPS = (double)result["frame-rate"].as<int>();
+    cam.setOffsetX( (2592 - w) / 2 );
+    cam.setOffsetY( (1944 - h) / 2 );
 
-    if ( std::string(argv[4]) == "hailo") {
-        HailoNN* hailo = new HailoNN(argv[5]);
+    if (result.count("nodetect") == 0) {
+        HailoNN* hailo = new HailoNN(result["model-path"].as<std::string>());
         NN = hailo;
-
     }
-    if ( std::string(argv[4]) == "rockchip") {
-        RockChipNN* rockchip = new RockChipNN(argv[5]);
-        NN = rockchip;
+    
 
-    }
     auto start = std::chrono::high_resolution_clock::now();
     std::thread capture_thread(start_capture, std::ref(cam));
     std::thread convert_thread(start_convert);
-    std::thread draw_thread(start_draw);
+    std::thread draw_thread;
+    if (result.count("nodisplay") == 0) { 
+        draw_thread = std::thread(start_draw);
+    }
+    std::thread inference_thread;
+    if (result.count("nodetect") == 0) {
+        inference_thread = std::thread(start_inference);
+    }
+   
 
 
     capture_thread.join();
     convert_thread.join();
-    draw_thread.join();
+
+    if (result.count("nodisplay") == 0) { 
+        draw_thread.join();
+    }
+    
+    if (result.count("nodetect") == 0) {
+        inference_thread.join();
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
 
