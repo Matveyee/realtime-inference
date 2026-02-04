@@ -6,7 +6,7 @@
                 "${workspaceFolder}/**",
                 // "${workspaceFolder}/include",
                 "${workspaceFolder}/third-party/cxxopts/include",
-                "${workspaceFolder}/complete_examples/benchmark_inference_hailo/include",
+                "${workspaceFolder}/complete_examples/benchmark_inference_rknn/include",
 
             ],
             "defines": [],
