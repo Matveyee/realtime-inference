@@ -1,0 +1,316 @@
+#include "../include/utils.hpp"
+
+
+void log(std::string message) {
+    if (DEBUG)
+        std::cout << "DEBUG: " << message << std::endl;
+}
+
+void change_log_level(bool val) {
+    DEBUG = val;
+}
+
+uint16_t modbus_crc16( const unsigned char *buf, unsigned int len ) {
+	uint16_t crc = 0xFFFF;
+	unsigned int i = 0;
+	char bit = 0;
+
+	for( i = 0; i < len; i++ )
+	{
+		crc ^= buf[i];
+
+		for( bit = 0; bit < 8; bit++ )
+		{
+			if( crc & 0x0001 )
+			{
+				crc >>= 1;
+				crc ^= 0xA001;
+			}
+			else
+			{
+				crc >>= 1;
+			}
+		}
+	}
+    return crc;
+}
+
+bool DEBUG;
+// drmModeRes* res;
+// drmModeConnector* conn;
+// uint32_t conn_id;
+// drmModeCrtc *old_crtc = nullptr;
+// uint8_t* map = nullptr;
+// uint32_t fb_id;
+// uint32_t handle;
+// uint32_t pitch;
+// uint64_t size;
+// uint32_t crtc_id;
+// drmModeModeInfo mode;
+// int drm_fd;
+// struct drm_mode_fb_cmd fb = {};
+
+
+
+// Vec::Vec(int p_x, int p_y) : x(p_x), y(p_y) {}
+// Vec::Vec() {}
+
+// void Vec::init(int p_x, int p_y) {
+//     x = p_x;
+//     y = p_y;
+// }
+
+// int Vec::getx() {
+//     return x;
+// }
+
+// int Vec::gety() {
+//     return y;
+// }
+// Vec& Vec::operator += (Vec& other) {
+//     x += other.getx();
+//     y += other.gety();
+//     return *this;
+// }
+// void Vec::print() {
+//     std::cout << "( " << x << "," << y << ")";
+// }
+
+
+
+// Vec operator +(Vec& first, Vec& second) {
+
+//     Vec vec(first.getx() + second.getx(), first.gety() + second.gety());
+//     return vec;
+
+// }
+
+// Projection::Projection() {}
+
+// Projection::Projection(uint8_t* data_ptr, int offset_x, int offset_y, int source_w, int source_h, int width, int height) : data(data_ptr), offsetX(offset_x), offsetY(offset_y), w(width), h(height), sourceW(source_w), sourceH(source_h) {}
+
+// uint8_t Projection::operator [](int index) {   
+    
+//     return data[(offsetY + index / w) * sourceW + offsetX + index % w];
+// }
+// void Projection::init(uint8_t* data_ptr , int offset_x, int offset_y, int source_w, int source_h, int width, int height) {
+//     data = data_ptr;
+//     offsetX = offset_x;
+//     offsetY = offset_y;
+//     w = width;
+//     h = height;
+//     sourceW = source_w;
+//     sourceH = source_h;
+// }
+// uint8_t Projection::get(int x, int y) {
+//     if (x > w || y > h) {
+//         return 0;
+//     } else {
+//         return (*this)[x + y * w];
+//     }
+    
+// }
+
+// uint8_t Projection::get(Vec vec) {
+//     return get(vec.getx(), vec.gety());
+// }
+
+// int Projection::getx() {
+//     return offsetX;
+// }
+
+// int Projection::gety() {
+//     return offsetY;
+// }
+
+// int Projection::getW() {
+//     return w;
+// }
+
+// int Projection::getH() {
+//     return h;
+// }
+
+
+// void draw_line(uint8_t* map, int x, int y, int x1, int y1, uint32_t pitch) {
+//     uint32_t pixel = (0xFF << 24) | (255 << 16) | (0 << 8) | 0;
+//     if (x == x1) {
+//         for (int i = y; i <= y1; i++) {
+//             ((uint32_t*)(map + i * pitch))[x] = pixel;
+//         }
+//     } else if (y == y1) {
+//         for (int i = x; i <= x1; i++) {
+//             ((uint32_t*)(map + y * pitch))[i] = pixel;
+//         }
+//     }
+    
+// }
+
+// void draw_rect(uint8_t* map, int x, int y, int x1, int y1, uint32_t pitch) {
+//     draw_line(map,x,y,x1,y, pitch);
+//     draw_line(map,x,y1,x1,y1, pitch);
+//     draw_line(map,x,y,x,y1, pitch);
+//     draw_line(map,x1,y,x1,y1, pitch);
+// }
+
+
+
+
+
+
+// void specifyVectors(Vec& R, Vec& G1, Vec& G2, Vec& B, Vec r) {
+    
+//     if ( (r.getx() % 2 == 0) && (r.gety() % 2 == 0)) {
+
+//         R.init(0,0);
+//         G1.init(1,0);
+//         G2.init(0,1);
+//         B.init(1,1);
+//     }else if ((r.getx() % 2 != 0) && (r.gety() % 2 == 0)) {
+
+//         G1.init(0,0);
+//         R.init(0,1);
+//         B.init(1,0);
+//         G2.init(1,1);
+//     }else if ((r.getx() % 2 == 0) && (r.gety() % 2 != 0)) {
+
+//         G2.init(0,0);
+//         B.init(1,0);
+//         R.init(0,1);
+//         G1.init(1,1);
+//     } else {
+
+//         B.init(0,0);
+//         G2.init(1,0);
+//         G1.init(0,1);
+//         R.init(1,1);
+//     }
+
+
+// }
+// uint8_t* toRGB(Projection input) {
+// //    debug("to rgb entered");
+//    // debug("entered to rgb");
+//     uint8_t* rgbData = (uint8_t*)calloc(  input.getW() * input.getH() * 3, sizeof(uint8_t));
+//    // debug("mem allocated");
+//     Vec r;
+//     Vec r0;
+//     Vec R;
+//     Vec G1;
+//     Vec G2;
+//     Vec B;
+//     r.init(0,0);
+//     r0.init(input.getx(), input.gety());
+//    // debug("before cycle");
+//     for (int i = 0; i < (input.getW() * input.getH()); i++ ) {
+//         // if (i % 10 == 0) {
+//         //     std::cout << i << std::endl;
+//         // }
+//         Vec d = r0 + r;
+//         specifyVectors(R, G1, G2, B, d);
+//         rgbData[i * 3 + 0] = input.get(r + R);
+//         rgbData[i * 3 + 1] = ( input.get(r + G1) + input.get(r + G2) ) / 2;
+//         rgbData[i * 3 + 2] = input.get(r + B);
+        
+
+//         Vec delta;
+//         if ( (i + 1) % input.getW() == 0 ) {
+//             delta.init(1 - input.getW(), 1);
+//         } else {
+//             delta.init(1,0);
+//         }
+//         r += delta;
+//     }
+//    // debug("before return");
+//    return rgbData;
+// }
+
+
+
+// void drawPicture(Projection* proj, uint8_t* data) {
+//     log("Draw picture entered");
+//      for (int y = 0; y < 640; ++y) {
+//         for (int x = 0; x < 640; ++x) {
+//             int src_offset = y * 640 * 3  + x * 3;
+            
+//             uint8_t r = data[src_offset + 0];
+//             uint8_t g = data[src_offset + 1];
+//             uint8_t b = data[src_offset + 2];
+
+//             uint32_t pixel = (0xFF << 24) | (r << 16) | (g << 8) | b;
+          
+//             ((uint32_t*)(map + (y) * pitch))[x] = pixel;
+//         }
+
+//     }
+//     log("drawPicture exit");
+// }
+
+// void drawPicture(uint8_t* data,int w, int h) {
+//     log("Draw picture entered");
+//      for (int y = 0; y < h; ++y) {
+//         for (int x = 0; x < w; ++x) {
+//             int src_offset = y * w * 3  + x * 3;
+            
+//             uint8_t r = data[src_offset + 0];
+//             uint8_t g = data[src_offset + 1];
+//             uint8_t b = data[src_offset + 2];
+
+//             uint32_t pixel = (0xFF << 24) | (r << 16) | (g << 8) | b;
+          
+//             ((uint32_t*)(map + (y) * pitch))[x] = pixel;
+//         }
+
+//     }
+//     log("drawPicture exit");
+// }
+
+// void drawPicture(int fd, int w, int h) {
+//     uint32_t handle;
+//     drmPrimeFDToHandle(drm_fd, fd, &handle);
+
+//     uint32_t handles[4] = { handle, 0, 0, 0 };
+//     uint32_t pitches[4] = { 0, 0, 0, 0 }; // stride в байтах
+//     uint32_t offsets[4] = { 0, 0, 0, 0 };
+
+//     uint32_t fb_id;
+//     int ret = drmModeAddFB2(drm_fd, w, h,
+//                 DRM_FORMAT_RGB888,
+//                 handles, pitches, offsets,
+//                 &fb_id, 0);
+
+//     if (ret) {
+//         perror("drmModeAddFB2");
+//         // не забыть закрыть handle
+//         struct drm_gem_close arg = { .handle = handle };
+//         drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &arg);
+//         return;
+//     }
+
+//     // 3. Подключаем этот framebuffer к CRTC → КАРТИНКА ПОЯВЛЯЕТСЯ
+//     ret = drmModeSetCrtc(drm_fd,
+//                          crtc_id,
+//                          fb_id,
+//                          0, 0,                // x, y на экране
+//                          &conn_id, 1,         // коннекторы
+//                          &mode);              // режим (разрешение/частота)
+//     if (ret) {
+//         perror("drmModeSetCrtc");
+//         drmModeRmFB(drm_fd, fb_id);
+//         struct drm_gem_close arg = { .handle = handle };
+//         drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &arg);
+//         return;
+//     }
+
+//     // 4. (Опционально) почистить предыдущий fb/handle, чтобы не было утечек
+//     // if (current_fb_id) {
+//     //     drmModeRmFB(drm_fd, current_fb_id);
+//     // }
+//     // if (current_handle) {
+//     //     struct drm_gem_close arg = { .handle = current_handle };
+//     //     drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &arg);
+//     // }
+
+//     // current_fb_id = fb_id;
+//     // current_handle = handle;
+// }

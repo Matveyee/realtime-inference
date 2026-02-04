@@ -77,4 +77,94 @@ void HailoNN::inference(standart_inference_ctx* ctx) {
 
 }
 
+void HailoNN::inference_dmabuf(standart_inference_ctx* ctx) {
+
+    auto &infer_model1 = configured_infer_model;
+
+    // создаём bindings
+    auto bindings_exp = infer_model1.create_bindings();
+    if (!bindings_exp) {
+        std::cerr << "Failed to create bindings: " << bindings_exp.status() << std::endl;
+        return;
+    }
+    auto bindings = std::move(bindings_exp.value());
+
+    // -----------------------------------------------------
+    //                  В Х О Д   (DMA)
+    // -----------------------------------------------------
+    for (const auto &input_name : infer_model->get_input_names()) {
+
+        // получаем входной stream
+        auto input_stream_exp = bindings.input(input_name);
+        if (!input_stream_exp) {
+            std::cerr << "Failed to get input stream: "
+                    << input_stream_exp.status() << std::endl;
+            return;
+        }
+        auto input_stream = input_stream_exp.value();
+
+        // узнаём размер входного кадра
+        size_t input_frame_size = infer_model->input(input_name)->get_frame_size();
+
+        // готовим dma buffer
+        hailo_dma_buffer_t dma_buf{};
+        dma_buf.fd   = ctx->fd;             // <<< вот он — fd от RGA
+        dma_buf.size = input_frame_size;   // 640*640*3
+
+        auto status = input_stream.set_dma_buffer(dma_buf);
+        if (status != HAILO_SUCCESS) {
+            std::cerr << "set_dma_buffer failed: " << status << std::endl;
+            return;
+        }
+    }
+
+    // -----------------------------------------------------
+    //                 В Ы Х О Д Ы  (CPU buffer)
+    // -----------------------------------------------------
+
+    std::vector<std::shared_ptr<uint8_t>> output_buffers;
+
+    for (const auto &output_name : infer_model->get_output_names()) {
+
+        size_t output_frame_size = infer_model->output(output_name)->get_frame_size();
+
+        // CPU (page aligned) buffer
+        auto out_buf = page_aligned_alloc(output_frame_size);
+        output_buffers.push_back(out_buf);
+
+        // привязываем MemoryView к bindings
+        auto output_stream = bindings.output(output_name).value();
+        auto status = output_stream.set_buffer(
+            hailort::MemoryView(out_buf.get(), output_frame_size)
+        );
+
+        if (status != HAILO_SUCCESS) {
+            std::cerr << "failed to set output buffer: " << status << std::endl;
+            return;
+        }
+    }
+
+    // -----------------------------------------------------
+    //                 З А П У С К   I N F E R
+    // -----------------------------------------------------
+
+    auto start = std::chrono::high_resolution_clock::now();
+    log("Trying to inference");
+    auto job = infer_model1.run_async(bindings,[&](const hailort::AsyncInferCompletionInfo & info){
+        log("Inferenced");
+        // free(ctx->input_buffer);
+        //free(ctx->output_buffer);
+        log("input free success");
+        
+        auto bboxes = parse_nms_data((uint8_t*)ctx->output_buffer, 80);
+
+        free(ctx->output_buffer);
+        draw_bounding_boxes(map, bboxes, 640, 640, pitch, ctx->proj);
+        delete[] ctx;
+   
+    }).expect("Failed to start async infer job");
+
+
+}
+
 

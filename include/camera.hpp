@@ -1,11 +1,14 @@
 #include "GxIAPI.h"
 #include <iostream>
-
+#include <linux/videodev2.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #ifndef CAMERA.HPP
 #define CAMERA.HPP
 // Abstract class, with callback function type as a parameter
-template<typename CallBackType>
+// template<typename CallBackType>
 class AbstractCamera {
 
     public:
@@ -15,7 +18,7 @@ class AbstractCamera {
         int offsetX = 0;
         int offsetY = 0;
 
-        virtual void setCallBack(CallBackType cllbck) = 0;
+       // virtual void setCallBack(CallBackType cllbck) = 0;
 
         virtual void setWidth(int w) = 0;
         
@@ -32,7 +35,7 @@ class AbstractCamera {
 
 };
 
-class AICamera : AbstractCamera<GXCaptureCallBack> {
+class AICamera : AbstractCamera {
 
     public:
 
@@ -40,7 +43,9 @@ class AICamera : AbstractCamera<GXCaptureCallBack> {
 
         AICamera();
 
-        void setCallBack(GXCaptureCallBack cllbck) override;
+        void init();
+
+       // void setCallBack(GXCaptureCallBack cllbck) override;
 
         void setWidth(int w) override;
 
@@ -63,6 +68,39 @@ class AICamera : AbstractCamera<GXCaptureCallBack> {
         int returnBuffer(PGX_FRAME_BUFFER* pFrameBuffer);
 
         void destroy();
+};
+
+class V4L2Camera : AbstractCamera {
+
+    public:
+
+        V4L2Camera(std::string path);
+
+        V4L2Camera();
+
+        struct v4l2_format fmt;
+        int fd;
+        int buffers[6];
+
+        int init(std::string path);
+
+        void setWidth(int w) override;
+
+        void setHeight(int h) override;
+
+        void setOffsetX(int x) override;
+        
+        void setOffsetY(int y) override;
+
+        void startCapture() override;
+
+        void stopCapture() override;
+
+        void getBuffer(struct v4l2_buffer** buf);
+
+        void destroy();
+
+
 };
 
 #endif

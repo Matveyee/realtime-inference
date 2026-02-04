@@ -4,6 +4,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <libdrm/drm_mode.h>
+#include <libdrm/drm_fourcc.h>
 #include <string>
 #include <iostream>
 #include <sys/ioctl.h>
@@ -90,8 +91,9 @@ uint8_t* toRGB(Projection input);
 
 void drawPicture(Projection* proj, uint8_t* data);
 void drawPicture( uint8_t* data,int w, int h);
+void drawPicture(int fd, int w, int h);
 
-void drm_init(int drm_fd);
-void drm_destroy(int drm_fd);
+void drm_init();
+void drm_destroy();
 
 #endif // UTILS_HPP

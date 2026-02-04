@@ -1,7 +1,12 @@
 #include "../include/camera.hpp"
 
-AICamera::AICamera() {
-    
+AICamera::AICamera() {}
+// void AICamera::setCallBack(GXCaptureCallBack cllbck) {
+//     GXRegisterCaptureCallback(hDevice, NULL, cllbck);
+// }
+
+void AICamera::init() {
+
     int status = GXInitLib();
 
     if (status != GX_STATUS_SUCCESS) {
@@ -26,34 +31,6 @@ AICamera::AICamera() {
     }
 
     GXSetAcqusitionBufferNumber(hDevice, 25);
-
-    // status = GXSetEnum(hDevice, GX_ENUM_LINE_SELECTOR,
-    // GX_ENUM_LINE_SELECTOR_LINE2);
-    
-    // status = GXSetEnum(hDevice, GX_ENUM_LINE_MODE,
-    // GX_ENUM_LINE_MODE_INPUT);
-
-    // status = GXSetEnum(hDevice, GX_ENUM_TRIGGER_SOURCE,
-    // GX_TRIGGER_SOURCE_LINE2);
-
-    //Sets the trigger mode to ON.
-    // status = GXSetEnum(hDevice, GX_ENUM_TRIGGER_MODE,
-    // GX_TRIGGER_MODE_ON);
-    // //Sets the trigger activation mode to the rising edge.
-    // status = GXSetEnum(hDevice,GX_ENUM_TRIGGER_ACTIVATION,
-    // GX_TRIGGER_ACTIVATION_RISINGEDGE);
-
-    //     GX_FLOAT_RANGE raisingRange;
-    // status = GXGetFloatRange(hDevice,GX_FLOAT_TRIGGER_FILTER_RAISING,
-    // &raisingRange);
-    // //Sets the rising edge filter to the minimum value.
-    // status = GXSetFloat(hDevice, GX_FLOAT_TRIGGER_FILTER_RAISING,
-    // raisingRange.dMin);
-    // std::cout << "Min " << raisingRange.dMin << std::endl;
-
-}
-void AICamera::setCallBack(GXCaptureCallBack cllbck) {
-    GXRegisterCaptureCallback(hDevice, NULL, cllbck);
 }
 
 void AICamera::setWidth(int w) {
@@ -104,4 +81,109 @@ void AICamera::stopCapture() {
 void AICamera::destroy() {
     GXCloseDevice(hDevice);
     GXCloseLib();
+}
+
+
+V4L2Camera::V4L2Camera(std::string path) {
+
+    fd = open(path.c_str(), O_RDWR);
+    fmt = {0};
+
+
+}
+
+V4L2Camera::V4L2Camera() {}
+
+void V4L2Camera::setWidth(int w) {
+
+    fmt.fmt.pix.width = w;
+
+}
+
+void V4L2Camera::setHeight(int h) {
+
+    fmt.fmt.pix.height = h;
+
+}
+
+int V4L2Camera::init(std::string path) {
+
+    fd = open(path.c_str(), O_RDWR);
+    fmt = {0};
+
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+        perror("VIDIOC_S_FMT");
+        return 1;
+    }
+
+    struct v4l2_requestbuffers req = {0};
+    req.count = 6;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_DMABUF;
+    if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
+        perror("VIDIOC_REQBUFS");
+        return 1;
+    }
+
+    
+
+    for (int i = 0; i < 6; i++) {
+        struct v4l2_exportbuffer buf = {0};
+
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.index = i;
+        buf.plane = 0;
+        buf.flags = O_CLOEXEC;
+
+
+        if (ioctl(fd, VIDIOC_EXPBUF, &buf) < 0) {
+            perror("VIDIOC_EXPBUF");
+            return 1;
+        }
+
+        buffers[i] = buf.fd;
+
+        if(ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+            perror("VIDIOC_QBUF");
+            return 1;
+        }
+
+    }
+}
+
+void V4L2Camera::startCapture() {
+
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) {
+        perror("VIDIOC_STREAMON");
+    }
+
+}
+
+void V4L2Camera::setOffsetX(int x) {}
+
+void V4L2Camera::setOffsetY(int y) {}
+
+void V4L2Camera::stopCapture() {
+
+    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd, VIDIOC_STREAMOFF, &type) < 0) {
+        perror("VIDIOC_STREAMOFF");
+    }
+
+}
+
+void V4L2Camera::getBuffer(struct v4l2_buffer** buf) {
+
+    if (ioctl(fd, VIDIOC_DQBUF, *buf) < 0) {
+        perror("VIDIOC_DQBUF");
+    }
+}
+
+void V4L2Camera::destroy() {
+    close(fd);
 }

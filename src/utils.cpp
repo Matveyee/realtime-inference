@@ -40,6 +40,9 @@ uint32_t fb_id;
 uint32_t handle;
 uint32_t pitch;
 uint64_t size;
+uint32_t crtc_id;
+drmModeModeInfo mode;
+int drm_fd;
 struct drm_mode_fb_cmd fb = {};
 
 
@@ -257,8 +260,60 @@ void drawPicture(uint8_t* data,int w, int h) {
     log("drawPicture exit");
 }
 
+void drawPicture(int fd, int w, int h) {
+    uint32_t handle;
+    drmPrimeFDToHandle(drm_fd, fd, &handle);
 
-void drm_init(int drm_fd) {
+    uint32_t handles[4] = { handle, 0, 0, 0 };
+    uint32_t pitches[4] = { 0, 0, 0, 0 }; // stride в байтах
+    uint32_t offsets[4] = { 0, 0, 0, 0 };
+
+    uint32_t fb_id;
+    int ret = drmModeAddFB2(drm_fd, w, h,
+                DRM_FORMAT_RGB888,
+                handles, pitches, offsets,
+                &fb_id, 0);
+
+    if (ret) {
+        perror("drmModeAddFB2");
+        // не забыть закрыть handle
+        struct drm_gem_close arg = { .handle = handle };
+        drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &arg);
+        return;
+    }
+
+    // 3. Подключаем этот framebuffer к CRTC → КАРТИНКА ПОЯВЛЯЕТСЯ
+    ret = drmModeSetCrtc(drm_fd,
+                         crtc_id,
+                         fb_id,
+                         0, 0,                // x, y на экране
+                         &conn_id, 1,         // коннекторы
+                         &mode);              // режим (разрешение/частота)
+    if (ret) {
+        perror("drmModeSetCrtc");
+        drmModeRmFB(drm_fd, fb_id);
+        struct drm_gem_close arg = { .handle = handle };
+        drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &arg);
+        return;
+    }
+
+    // 4. (Опционально) почистить предыдущий fb/handle, чтобы не было утечек
+    // if (current_fb_id) {
+    //     drmModeRmFB(drm_fd, current_fb_id);
+    // }
+    // if (current_handle) {
+    //     struct drm_gem_close arg = { .handle = current_handle };
+    //     drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &arg);
+    // }
+
+    // current_fb_id = fb_id;
+    // current_handle = handle;
+}
+
+
+void drm_init() {
+
+    drm_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
 
     log("Drm opened");
     if (drm_fd < 0) {
@@ -268,7 +323,7 @@ void drm_init(int drm_fd) {
 
     res = drmModeGetResources(drm_fd);
     conn = nullptr;
-    drmModeModeInfo mode;
+    
     conn_id = 0;
     for (int i = 0; i < res->count_connectors; ++i) {
         conn = drmModeGetConnector(drm_fd, res->connectors[i]);
@@ -287,7 +342,7 @@ void drm_init(int drm_fd) {
     }
 
     drmModeEncoder* enc = drmModeGetEncoder(drm_fd, conn->encoder_id);
-    uint32_t crtc_id = enc->crtc_id;
+    crtc_id = enc->crtc_id;
     old_crtc = drmModeGetCrtc(drm_fd, crtc_id);
     log("Drm encoder");
     struct drm_mode_create_dumb create = {};
@@ -317,7 +372,7 @@ void drm_init(int drm_fd) {
 
 } 
 
-void drm_destroy(int drm_fd) {
+void drm_destroy() {
 
     if (old_crtc) {
         drmModeSetCrtc(drm_fd, old_crtc->crtc_id, old_crtc->buffer_id,

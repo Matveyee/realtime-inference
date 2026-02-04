@@ -4,8 +4,10 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "${workspaceFolder}/include",
-                "${workspaceFolder}/third-party/cxxopts/include"
+                // "${workspaceFolder}/include",
+                "${workspaceFolder}/third-party/cxxopts/include",
+                "${workspaceFolder}/complete_examples/benchmark_inference_hailo/include",
+
             ],
             "defines": [],
             "compilerPath": "/usr/bin/clang-11",

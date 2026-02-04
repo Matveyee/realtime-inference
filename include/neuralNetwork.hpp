@@ -13,6 +13,8 @@ class AbstractNNBase {
 
         virtual void inference(void* ctx) = 0;
 
+        virtual void inference_dmabuf(void* ctx) = 0;
+
 };
 //Abstract class for NeuralNetwork
 template<typename InferenceContext>
@@ -28,6 +30,10 @@ class AbstractNN : public AbstractNNBase{
             inference(static_cast<InferenceContext*>(ctx));
         }
 
+        void inference_dmabuf(void* ctx) {
+            inference_dmabuf(static_cast<InferenceContext*>(ctx));
+        }
+
 };
 
 
@@ -37,6 +43,7 @@ typedef struct {
 
 
     void* input_buffer;
+    int fd;
     void* output_buffer;
     Projection proj;
 

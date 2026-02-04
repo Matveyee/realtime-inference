@@ -17,4 +17,6 @@ class HailoNN : public AbstractNN<standart_inference_ctx> {
 
         void inference(standart_inference_ctx* ctx) override;
 
+        void inference_dmabuf(standart_inference_ctx* ctx);
+
 };

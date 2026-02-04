@@ -15,12 +15,15 @@
 #include "queue.hpp"
 #include <csignal>
 #include <linux/dma-heap.h>
+#include "MPPEntity.hpp"
+#include "Pool.hpp"
 
 #define RED     "\033[31m"
 #define GREEN   "\033[32m"
 #define YELLOW  "\033[33m"
 #define BLUE    "\033[34m"
 #define RESET   "\033[0m"
+#define SIZE 640
 
 int WIDTH;
 int HEIGHT;
@@ -39,6 +42,8 @@ int conv_index = 0;
 int draw_index = 0;
 GPIO gpio;
 cxxopts::ParseResult result;
+MPPEntity mpp;
+
 auto simple_now() {
     return std::chrono::high_resolution_clock::now();
 }
@@ -82,17 +87,58 @@ class BufferQueueObject {
         }
 };
 
+class DMABufferQueueObject {
+    
+    public:
+
+        struct v4l2_buffer* buf;
+        int v4l2_fd;
+
+        DMABufferQueueObject(struct v4l2_buffer* buffer, int fd) : buf(buffer), v4l2_fd(fd) {}
+
+        void close() {
+            if (ioctl(v4l2_fd, VIDIOC_QBUF, buf) < 0) {
+                perror("VIDIOC_QBUF");
+            }
+        }
+};
+
+
+
 Queue<FrameBufferQueueObject> queue;
 Queue<BufferQueueObject> pic_queue;
 Queue<BufferQueueObject> infer_queue;
-Queue<FrameBufferQueueObject> free_queue;
+Queue<DMAPoolBufferObject> pic_queue_dmabuf;
+Queue<DMAPoolBufferObject> infer_queue_dmabuf;
+Queue<DMABufferQueueObject> v4l2_queue;
+Queue<MppFrameQueueObject> decoded_queue;
+Pool<DMAPoolBufferObject, 15> nv12_pool;
+Pool<DMAPoolBufferObject, 15> rgb_pool;
 
+void start_inference_dmabuf() {
+
+    while (true) {
+        STOP
+
+        if (infer_queue_dmabuf.size == 0) {
+            continue;
+        }
+
+        standart_inference_ctx* ctx = new standart_inference_ctx();
+        ctx->fd = infer_queue_dmabuf.read().fd;
+
+        context = ctx;
+        NN->inference_dmabuf(context);
+        infer_queue_dmabuf.pop();
+
+    }
+
+}
 void start_inference() {
     while (true) {
         STOP
 
         if (infer_queue.size == 0) {
-        //    std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
 
@@ -110,7 +156,6 @@ void start_draw() {
     while (true) {
         STOP
         if (pic_queue.size <= 0) {
-        //    std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
         uint8_t* data = pic_queue.read().data;
@@ -120,9 +165,14 @@ void start_draw() {
         if (cap_index % 10 == 0){ 
             std::cout << "DELAY: " << cap_index <<"; " << conv_index << "; " << draw_index <<"; "<< cap_index - draw_index << std::endl;
         }
-
-        infer_queue.push(data);
-        pic_queue.remove();
+        
+        
+        if (result.count("nodetect") == 0) {
+            infer_queue.push(data);
+            pic_queue.remove();
+        } else {
+            pic_queue.pop();
+        }
         std::cout << "size before" << pic_queue.size << std::endl; 
         
         std::cout << "size after" << pic_queue.size << std::endl;
@@ -130,12 +180,41 @@ void start_draw() {
         STOP
     }
 }
+
+void start_draw_v4l2() {
+    while (true) {
+        STOP
+        if (pic_queue_dmabuf.size <= 0) {
+            continue;
+        }
+        int fd = pic_queue_dmabuf.read().fd;
+        drawPicture(fd, WIDTH, HEIGHT);
+        draw_index++;
+        std::cout << "index " << cap_index << std::endl;
+        if (cap_index % 10 == 0){ 
+            std::cout << "DELAY: " << cap_index <<"; " << conv_index << "; " << draw_index <<"; "<< cap_index - draw_index << std::endl;
+        }
+        
+        
+        // if (result.count("nodetect") == 0) {
+        //     infer_queue.push(data);
+        //     pic_queue.remove();
+        // } else {
+        pic_queue_dmabuf.pop();
+        // }
+        // std::cout << "size before" << pic_queue.size << std::endl; 
+        
+        // std::cout << "size after" << pic_queue.size << std::endl;
+
+        STOP
+    }
+}
+
 void start_convert() {
     
     while (true) {
         STOP
         if (queue.size <= 0) {
-          //  std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
         
@@ -168,95 +247,143 @@ void start_convert() {
         
         if (result.count("noresize") == 0) {
 
-        uint8_t* dst_buf = (uint8_t*)malloc(WIDTH * HEIGHT * 3);
-        rga_buffer_t src; rga_buffer_t dst;
-        rga_buffer_handle_t src_handle; rga_buffer_handle_t dst_handle; 
-         
-        
+            uint8_t* dst_buf = (uint8_t*)malloc(WIDTH * HEIGHT * 3);
+            rga_buffer_t src; rga_buffer_t dst;
+            rga_buffer_handle_t src_handle; rga_buffer_handle_t dst_handle; 
+            
+            src_handle = importbuffer_virtualaddr(data, buf->nWidth, buf->nHeight, RK_FORMAT_RGB_888);
+            dst_handle = importbuffer_virtualaddr(dst_buf, WIDTH, HEIGHT, RK_FORMAT_RGB_888);
+            
+
+            src = wrapbuffer_handle(
+                src_handle,
+                buf->nWidth,
+                buf->nHeight,
+                RK_FORMAT_RGB_888
+            );
+
+            dst = wrapbuffer_handle(
+                dst_handle,
+                WIDTH,
+                HEIGHT,
+                RK_FORMAT_RGB_888
+            );
 
         
-        src_handle = importbuffer_virtualaddr(data, buf->nWidth, buf->nHeight, RK_FORMAT_RGB_888);
-        dst_handle = importbuffer_virtualaddr(dst_buf, WIDTH, HEIGHT, RK_FORMAT_RGB_888);
-        
-
-        src = wrapbuffer_handle(
-            src_handle,
-            buf->nWidth,
-            buf->nHeight,
-            RK_FORMAT_RGB_888
-        );
-
-        dst = wrapbuffer_handle(
-            dst_handle,
-            WIDTH,
-            HEIGHT,
-            RK_FORMAT_RGB_888
-        );
-
-    
-        
-        IM_STATUS STATUS = imresize(src, dst);
-        free(data);
-        STATUS = releasebuffer_handle(src_handle);
-        
-        pic_queue.push(dst_buf);
-        STATUS = releasebuffer_handle(dst_handle);
+            
+            IM_STATUS STATUS = imresize(src, dst);
+            free(data);
+            STATUS = releasebuffer_handle(src_handle);
+            
+            pic_queue.push(dst_buf);
+            STATUS = releasebuffer_handle(dst_handle);
         }
         else {
             pic_queue.push(data);
         }  
-       // free(data);
-        // std::cout << "STATUS : " << STATUS << std::endl;
 
-        // uint8_t* infer_buf = (uint8_t*)malloc(640 * 640 * 3);
-        // rga_buffer_handle_t infer_handle;
-        // infer_handle = importbuffer_virtualaddr(infer_buf, 640, 640, RK_FORMAT_RGB_888);
-        // rga_buffer_t infer;
-
-
-        // infer = wrapbuffer_handle(
-        //     infer_handle,
-        //     640,
-        //     640,
-        //     RK_FORMAT_RGB_888
-        // );
-
-
-        // STATUS = imresize(dst, infer);
-        //STATUS = releasebuffer_handle(infer_handle);
-       // STATUS = releasebuffer_handle(dst_handle);
-        
-        // free_queue.push(fbqo);
-        // queue.remove();
         queue.pop();
         
         conv_index++;
-      //  infer_queue.push(infer_buf);
+
         
 
         STOP
     }
 }
 
+void start_convert_v4l2() {
+    
+    nv12_pool.init(SIZE*SIZE*3/2);
+    rgb_pool.init(SIZE*SIZE*3);
+    while (true) {
+        
+        STOP
+
+        auto mfqo = decoded_queue.read();
+        MppFrame frame = mfqo.frame;
+
+        rga_buffer_t src;
+        rga_buffer_t dst;
+        rga_buffer_t final_dst;
+
+        MppBuffer mpp_buffer = mpp_frame_get_buffer(frame);
+        int src_fd = mpp_buffer_get_fd(mpp_buffer);
+
+        // NV12 WIDTHxHEIGHT dma-buffer Image
+
+        src = wrapbuffer_fd_t(
+            src_fd,
+            mpp_frame_get_width(frame), 
+            mpp_frame_get_height(frame), 
+            mpp_frame_get_hor_stride(frame), 
+            mpp_frame_get_ver_stride(frame), 
+            RK_FORMAT_YCbCr_420_SP);
+
+        DMAPoolBufferObject dst_buffer = nv12_pool.capture();
+
+        // NV12 640x640 dma-buffer Image
+        dst = wrapbuffer_fd(dst_buffer.fd, SIZE, SIZE, RK_FORMAT_YCbCr_420_SP);
+
+        IM_STATUS status = imresize(src, dst);
+        
+        
+        decoded_queue.pop();
+
+        DMAPoolBufferObject rgb_buffer = rgb_pool.capture();
+
+        final_dst = wrapbuffer_fd(rgb_buffer.fd, SIZE, SIZE, RK_FORMAT_RGB_888);
+
+        status = imcvtcolor(dst, final_dst, RK_FORMAT_YCbCr_420_SP, RK_FORMAT_RGB_888);
+
+        dst_buffer.release();
+        pic_queue_dmabuf.push(rgb_buffer);
+        
+
+    }
+    
+}
+
+void start_decode() {
+
+    while (true) {
+        
+        STOP
+
+        DMABufferQueueObject dbqo = v4l2_queue.read();
+
+        MppFrame frame = mpp.decode_packet(dbqo.buf->m.fd, dbqo.buf->bytesused);
+
+        v4l2_queue.pop();
+
+        decoded_queue.push(frame);
+
+    }
+    
+
+}
+
 int count = 0;
-void start_capture(AICamera& cam) {
+void start_capture(AICamera* cam_ptr) {
+    AICamera cam = *cam_ptr;
     auto start = simple_now();
-    // queue.set_limit(4);
+
     while (true) {
         STOP
         
         if (queue.size >= 4) {
-            // std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
             continue;
-            // log("MUTEX: blocked in capture thread");
-            // queue.size_mutex.lock();
+
         }
         
         PGX_FRAME_BUFFER pFrameBuffer;
         
         cam.startStream();
         
-        cam.getBuffer(&pFrameBuffer);
+        if (cam.getBuffer(&pFrameBuffer) == GX_STATUS_SUCCESS) {
+            continue;
+        }
         std::cout << YELLOW << "Captured" << RESET << std::endl;
         
         FrameBufferQueueObject fbqo(&pFrameBuffer, &cam, count);
@@ -270,53 +397,49 @@ void start_capture(AICamera& cam) {
         start = simple_now();
         
         std::this_thread::sleep_for(std::chrono::milliseconds( (int)( (1.0 / FPS) * 1000 - dur.count() ) ) );
-        // if (free_queue.size != 0) {
-        //     free_queue.pop();
-        //     std::cout << "QUEUE ssize: " << queue.size << std::endl;
-        //     std::cout << "PIC ssize: " << pic_queue.size << std::endl;
-        //     std::cout << "INFER ssize: " << infer_queue.size << std::endl;
-        //     std::cout << "FREE ssize: " << free_queue.size << std::endl;
-        // }
-        
-        
 
         STOP
     }
     
 }
 
-int main(int argc, char* argv[]) {
+void start_capture_v4l2(V4L2Camera* cam_ptr) {
 
-    cxxopts::Options options("app", "options for app");
+    V4L2Camera cam = *cam_ptr;
+    cam.startCapture();
+    auto start = simple_now();
 
-    options.add_options()
-    ("nr,noresize", "Whether resize or not")
-    ("nds,nodisplay", "Whether display or not")
-    ("ndt,nodetect", "Whether detect or not")
-    ("iw,input-width", "Input width", cxxopts::value<int>()->default_value("640"))
-    ("ih,input-height", "Input height", cxxopts::value<int>()->default_value("640"))
-    ("dw,display-width", "Display width", cxxopts::value<int>()->default_value("640"))
-    ("dh,display-height", "Display height", cxxopts::value<int>()->default_value("640"))
-    ("p,model-path", "Path to .hef model", cxxopts::value<std::string>())
-    ("f,frame-rate", "Input frame-rate", cxxopts::value<int>()->default_value("30"));
+    while (true) {
+        STOP
 
-    result = options.parse(argc, argv);
+        struct v4l2_buffer* buf = new struct v4l2_buffer();
+        memset(buf, 0, sizeof(struct v4l2_buffer));
+        buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf->memory = V4L2_MEMORY_DMABUF;
 
+        if (ioctl(cam.fd, VIDIOC_DQBUF, buf) < 0) {
+            perror("VIDIOC_DQBUF");
+        }
 
-    
+        DMABufferQueueObject dbqo(buf, cam.fd);
+        v4l2_queue.push(dbqo);
+
+        
+    }
+
+}
+
+void start_pipeline_for_v4l2_camera() {
+
     int drm_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
-    drm_init(drm_fd);
+    drm_init();
 
-
-
-    // Relay relay("/dev/ttyUSB0");
-    // gpio.init(39);
     signal(SIGINT, sigint_handler);
-    AICamera cam;
+
+    V4L2Camera cam_v4l2;
+
     int w = result["input-width"].as<int>();
     int h = result["input-height"].as<int>();
-    cam.setHeight(w);
-    cam.setWidth(h);
     if (result.count("noresize") == 0) {
         WIDTH = result["display-width"].as<int>();
         HEIGHT = result["display-height"].as<int>();
@@ -324,8 +447,90 @@ int main(int argc, char* argv[]) {
         WIDTH = w;
         HEIGHT = h;
     }
-    
     FPS = (double)result["frame-rate"].as<int>();
+
+
+    cam_v4l2.init(result["camera-path"].as<std::string>());
+
+    
+    cam_v4l2.setHeight(h);
+    cam_v4l2.setWidth(w);
+
+    mpp.init();
+
+    if (result.count("nodetect") == 0) {
+        HailoNN* hailo = new HailoNN(result["model-path"].as<std::string>());
+        NN = hailo;
+    }
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    // std::thread capture_thread(start_capture_v4l2, &cam_v4l2);
+    // return;
+    std::thread decode_thread(start_decode);
+    // std::thread convert_thread(start_convert_v4l2);
+    
+
+    return;
+    // std::thread draw_thread;
+    // if (result.count("nodisplay") == 0) { 
+    //     draw_thread = std::thread(start_draw);
+    // }
+    // std::thread inference_thread;
+    // if (result.count("nodetect") == 0) {
+    //     inference_thread = std::thread(start_inference_dmabuf);
+    // }
+
+
+    // capture_thread.join();
+    // decode_thread.join();
+    // convert_thread.join();
+
+    // if (result.count("nodisplay") == 0) { 
+    //     draw_thread.join();
+    // }
+    
+    // if (result.count("nodetect") == 0) {
+    //     inference_thread.join();
+    // }
+    
+    // auto end = std::chrono::high_resolution_clock::now();
+
+    // std::chrono::duration<double, std::milli> dura = end - start;
+
+    // std::cout << "AVERAGE FPS = " << count / (dura.count() / 1000) << std::endl;
+    // cam_v4l2.destroy();
+
+    // drm_destroy();
+}
+
+void start_pipeline_for_gx_camera() {
+
+    
+    drm_init();
+
+    signal(SIGINT, sigint_handler);
+
+    AICamera cam;
+
+    int w = result["input-width"].as<int>();
+    int h = result["input-height"].as<int>();
+    if (result.count("noresize") == 0) {
+        WIDTH = result["display-width"].as<int>();
+        HEIGHT = result["display-height"].as<int>();
+    } else {
+        WIDTH = w;
+        HEIGHT = h;
+    }
+    FPS = (double)result["frame-rate"].as<int>();
+
+
+    cam.init();
+    
+    cam.setHeight(h);
+    cam.setWidth(w);
+    
+    
+    
     cam.setOffsetX( (2592 - w) / 2 );
     cam.setOffsetY( (1944 - h) / 2 );
 
@@ -336,18 +541,21 @@ int main(int argc, char* argv[]) {
     
 
     auto start = std::chrono::high_resolution_clock::now();
-    std::thread capture_thread(start_capture, std::ref(cam));
-    std::thread convert_thread(start_convert);
+    std::thread capture_thread;
+    std::thread convert_thread;
+
+    capture_thread = std::thread(start_capture, &cam);
+    convert_thread = std::thread(start_convert);
+
     std::thread draw_thread;
     if (result.count("nodisplay") == 0) { 
         draw_thread = std::thread(start_draw);
     }
+
     std::thread inference_thread;
     if (result.count("nodetect") == 0) {
         inference_thread = std::thread(start_inference);
     }
-   
-
 
     capture_thread.join();
     convert_thread.join();
@@ -367,8 +575,34 @@ int main(int argc, char* argv[]) {
     std::cout << "AVERAGE FPS = " << count / (dura.count() / 1000) << std::endl;
     cam.destroy();
 
-    drm_destroy(drm_fd);
+    drm_destroy();
 
+}
+
+int main(int argc, char* argv[]) {
+
+    cxxopts::Options options("app", "options for app");
+
+    options.add_options()
+    ("nr,noresize", "Whether resize or not")
+    ("nds,nodisplay", "Whether display or not")
+    ("ndt,nodetect", "Whether detect or not")
+    ("iw,input-width", "Input width", cxxopts::value<int>()->default_value("640"))
+    ("ih,input-height", "Input height", cxxopts::value<int>()->default_value("640"))
+    ("dw,display-width", "Display width", cxxopts::value<int>()->default_value("640"))
+    ("dh,display-height", "Display height", cxxopts::value<int>()->default_value("640"))
+    ("p,model-path", "Path to .hef model", cxxopts::value<std::string>())
+    ("cp,camera-path", "Path to v4l2 (/dev/video*) camera", cxxopts::value<std::string>())
+    ("f,frame-rate", "Input frame-rate", cxxopts::value<int>()->default_value("30"));
+
+    result = options.parse(argc, argv);
+
+    if (result.count("camera-path") == 0) {
+        start_pipeline_for_gx_camera();
+    } else {
+        start_pipeline_for_v4l2_camera();
+    }
+    
     return 0;
 }
 
