@@ -1,0 +1,78 @@
+int MPPEntity::try_get_frame(MppFrame* out_frame) {
+    int i = 0;
+    while (true) {
+    
+    
+        MppFrame frame = nullptr;
+        MPP_RET ret = mpi->decode_get_frame(ctx, &frame);
+
+        if (ret != MPP_OK) {
+            // настоящая ошибка
+            error("decode_get_frame: ", ret);
+            return -2;
+        }
+
+        if (!frame) {
+            // просто нет готового кадра сейчас
+            i++;
+            if (i > 100) {
+                return -1;
+            }
+            continue;
+        }
+
+        if (mpp_frame_get_info_change(frame)) {
+            handle_info_change(ctx, mpi, frame, ext_group, ext_group_inited);
+            mpp_frame_deinit(&frame);
+            return 1; // это не ошибка – просто сервисное событие
+        }
+
+        if (mpp_frame_get_errinfo(frame)) {
+            // битый кадр – выкидываем
+            mpp_frame_deinit(&frame);
+            return 1;
+        }
+        *out_frame = frame;
+    }
+     // ответственность за mpp_frame_deinit на вызывающем коде
+    return 0;           // 0 – есть валидный кадр
+}
+
+void start_decode() {
+
+    while (true) {
+        
+        STOP
+        if (v4l2_queue.size == 0) {
+            continue;
+        }
+        DMABufferQueueObject dbqo = v4l2_queue.read();
+        
+        int ret = mpp.put_packet_dma(cam_v4l2.buffers[dbqo.buf->index], dbqo.buf->bytesused, dbqo.buf->length);
+        if (ret) {
+            error("put_packet_dma error: ", ret);
+            stop = 1;
+            break;
+        }
+
+        v4l2_queue.pop();
+
+        MppFrame frame;
+        ret = mpp.try_get_frame(&frame);
+
+        if (ret == -2) {
+            error("mpp.try_get_frame: ", ret);
+            stop = 1;
+            break;
+        } else {
+            continue;
+        }
+
+        decoded_queue.push(frame);
+
+        
+        
+    }
+    
+
+}

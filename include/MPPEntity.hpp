@@ -1,4 +1,5 @@
 #include "inc/rk_mpi.h"
+#include "inc/mpp_log.h"
 #include <iostream>
 #include <fcntl.h>
 #include <cstring>
@@ -20,6 +21,7 @@ class MPPEntity {
         unsigned char* buf;
         MppBufferGroup ext_group;
         bool ext_group_inited;
+        MppBufferGroup in_group;
 
         MPPEntity();
 
@@ -31,7 +33,13 @@ class MPPEntity {
             MppBufferGroup &ext_group,
             bool &ext_inited);
 
-        MppFrame decode_packet(int fd, int size);
+        int put_packet_dma(int fd, int used, int size);
+
+        int put_packet(void* buf, int size);
+
+        int try_get_frame(MppFrame* frame);
+
+        void destroy();
 
         
 };

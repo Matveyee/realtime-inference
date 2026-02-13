@@ -43,6 +43,7 @@ int draw_index = 0;
 GPIO gpio;
 cxxopts::ParseResult result;
 MPPEntity mpp;
+V4L2Camera cam_v4l2;
 
 auto simple_now() {
     return std::chrono::high_resolution_clock::now();
@@ -115,25 +116,7 @@ Queue<MppFrameQueueObject> decoded_queue;
 Pool<DMAPoolBufferObject, 15> nv12_pool;
 Pool<DMAPoolBufferObject, 15> rgb_pool;
 
-void start_inference_dmabuf() {
 
-    while (true) {
-        STOP
-
-        if (infer_queue_dmabuf.size == 0) {
-            continue;
-        }
-
-        standart_inference_ctx* ctx = new standart_inference_ctx();
-        ctx->fd = infer_queue_dmabuf.read().fd;
-
-        context = ctx;
-        NN->inference_dmabuf(context);
-        infer_queue_dmabuf.pop();
-
-    }
-
-}
 void start_inference() {
     while (true) {
         STOP
@@ -181,34 +164,7 @@ void start_draw() {
     }
 }
 
-void start_draw_v4l2() {
-    while (true) {
-        STOP
-        if (pic_queue_dmabuf.size <= 0) {
-            continue;
-        }
-        int fd = pic_queue_dmabuf.read().fd;
-        drawPicture(fd, WIDTH, HEIGHT);
-        draw_index++;
-        std::cout << "index " << cap_index << std::endl;
-        if (cap_index % 10 == 0){ 
-            std::cout << "DELAY: " << cap_index <<"; " << conv_index << "; " << draw_index <<"; "<< cap_index - draw_index << std::endl;
-        }
-        
-        
-        // if (result.count("nodetect") == 0) {
-        //     infer_queue.push(data);
-        //     pic_queue.remove();
-        // } else {
-        pic_queue_dmabuf.pop();
-        // }
-        // std::cout << "size before" << pic_queue.size << std::endl; 
-        
-        // std::cout << "size after" << pic_queue.size << std::endl;
 
-        STOP
-    }
-}
 
 void start_convert() {
     
@@ -292,6 +248,98 @@ void start_convert() {
     }
 }
 
+
+
+
+
+int count = 0;
+void start_capture(AICamera* cam_ptr) {
+    AICamera cam = *cam_ptr;
+    auto start = simple_now();
+
+    while (true) {
+        STOP
+        
+        if (queue.size >= 4) {
+
+            continue;
+
+        }
+        
+        PGX_FRAME_BUFFER pFrameBuffer;
+        
+        cam.startStream();
+        
+        if (cam.getBuffer(&pFrameBuffer) == GX_STATUS_SUCCESS) {
+            continue;
+        }
+        std::cout << YELLOW << "Captured" << RESET << std::endl;
+        
+        FrameBufferQueueObject fbqo(&pFrameBuffer, &cam, count);
+        printf("before %p\n", pFrameBuffer);
+        std::cout << BLUE << "INDEX " << count << RESET<< std::endl;
+        count++;
+        queue.push(fbqo);
+        cap_index++;
+        auto end = simple_now();
+        Duration dur = end - start;
+        start = simple_now();
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds( (int)( (1.0 / FPS) * 1000 - dur.count() ) ) );
+
+        STOP
+    }
+    
+}
+void start_inference_dmabuf() {
+
+    while (true) {
+        STOP
+
+        if (infer_queue_dmabuf.size == 0) {
+            continue;
+        }
+
+        standart_inference_ctx* ctx = new standart_inference_ctx();
+        ctx->fd = infer_queue_dmabuf.read().fd;
+
+        context = ctx;
+        NN->inference_dmabuf(context);
+        infer_queue_dmabuf.pop();
+
+    }
+
+}
+
+void start_draw_v4l2() {
+    while (true) {
+        STOP
+        if (pic_queue_dmabuf.size <= 0) {
+            continue;
+        }
+        int fd = pic_queue_dmabuf.read().fd;
+        drawPicture(fd, WIDTH, HEIGHT);
+        draw_index++;
+        std::cout << "index " << cap_index << std::endl;
+        if (cap_index % 10 == 0){ 
+            std::cout << "DELAY: " << cap_index <<"; " << conv_index << "; " << draw_index <<"; "<< cap_index - draw_index << std::endl;
+        }
+        
+        
+        // if (result.count("nodetect") == 0) {
+        //     infer_queue.push(data);
+        //     pic_queue.remove();
+        // } else {
+        pic_queue_dmabuf.pop();
+        // }
+        // std::cout << "size before" << pic_queue.size << std::endl; 
+        
+        // std::cout << "size after" << pic_queue.size << std::endl;
+
+        STOP
+    }
+}
+
 void start_convert_v4l2() {
     
     nv12_pool.init(SIZE*SIZE*3/2);
@@ -299,7 +347,9 @@ void start_convert_v4l2() {
     while (true) {
         
         STOP
-
+        if (decoded_queue.size == 0) {
+            continue;
+        }
         auto mfqo = decoded_queue.read();
         MppFrame frame = mfqo.frame;
 
@@ -349,83 +399,149 @@ void start_decode() {
     while (true) {
         
         STOP
-
+        if (v4l2_queue.size == 0) {
+            continue;
+        }
         DMABufferQueueObject dbqo = v4l2_queue.read();
-
-        MppFrame frame = mpp.decode_packet(dbqo.buf->m.fd, dbqo.buf->bytesused);
+        void *src = mmap(nullptr, dbqo.buf->bytesused, PROT_READ, MAP_SHARED, cam_v4l2.buffers[dbqo.buf->index], 0);
+        int ret = mpp.put_packet(src, dbqo.buf->length);
+        if (ret) {
+            error("put_packet_dma error: ", ret);
+            stop = 1;
+            break;
+        }
 
         v4l2_queue.pop();
 
+        MppFrame frame;
+        ret = mpp.try_get_frame(&frame);
+
+        if (ret) {
+            error("mpp.try_get_frame: ", ret);
+            stop = 1;
+            break;
+        } else {
+            std::cout << "returned 0" << std::endl;
+            continue;
+        }
+
         decoded_queue.push(frame);
 
+        
+        
     }
     
 
 }
 
-int count = 0;
-void start_capture(AICamera* cam_ptr) {
-    AICamera cam = *cam_ptr;
-    auto start = simple_now();
 
-    while (true) {
-        STOP
-        
-        if (queue.size >= 4) {
+void start_capture_v4l2() {
 
-            continue;
-
-        }
-        
-        PGX_FRAME_BUFFER pFrameBuffer;
-        
-        cam.startStream();
-        
-        if (cam.getBuffer(&pFrameBuffer) == GX_STATUS_SUCCESS) {
-            continue;
-        }
-        std::cout << YELLOW << "Captured" << RESET << std::endl;
-        
-        FrameBufferQueueObject fbqo(&pFrameBuffer, &cam, count);
-        printf("before %p\n", pFrameBuffer);
-        std::cout << BLUE << "INDEX " << count << RESET<< std::endl;
-        count++;
-        queue.push(fbqo);
-        cap_index++;
-        auto end = simple_now();
-        Duration dur = end - start;
-        start = simple_now();
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds( (int)( (1.0 / FPS) * 1000 - dur.count() ) ) );
-
-        STOP
-    }
-    
-}
-
-void start_capture_v4l2(V4L2Camera* cam_ptr) {
-
-    V4L2Camera cam = *cam_ptr;
-    cam.startCapture();
+   
+    cam_v4l2.startCapture();
     auto start = simple_now();
 
     while (true) {
         STOP
 
         struct v4l2_buffer* buf = new struct v4l2_buffer();
+        
         memset(buf, 0, sizeof(struct v4l2_buffer));
         buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf->memory = V4L2_MEMORY_DMABUF;
+        buf->memory = V4L2_MEMORY_MMAP;
 
-        if (ioctl(cam.fd, VIDIOC_DQBUF, buf) < 0) {
+        if (ioctl(cam_v4l2.fd, VIDIOC_DQBUF, buf) < 0) {
             perror("VIDIOC_DQBUF");
         }
 
-        DMABufferQueueObject dbqo(buf, cam.fd);
+    
+
+        DMABufferQueueObject dbqo(buf, cam_v4l2.fd);
         v4l2_queue.push(dbqo);
 
         
     }
+
+}
+
+void start_test( ) {
+    cam_v4l2.startCapture();
+    while (!stop) {
+
+    // 1. Вытягиваем один буфер из V4L2
+    struct v4l2_buffer v4l2buf = {};
+    v4l2buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    v4l2buf.memory = V4L2_MEMORY_MMAP;
+
+    if (ioctl(cam_v4l2.fd, VIDIOC_DQBUF, &v4l2buf) < 0) {
+        perror("VIDIOC_DQBUF");
+        continue;
+    }
+
+    int index    = v4l2buf.index;
+    int dma_fd   = cam_v4l2.buffers[index];
+    int used     = v4l2buf.bytesused;
+    int total    = cam_v4l2.sizes[index];
+
+    void* src = mmap(nullptr, used, PROT_READ, MAP_SHARED, dma_fd, 0);
+    void* dst = malloc(used);
+    memcpy(dst, src, used);
+   
+    munmap(src, used);
+    // stop = 1;
+    // break;
+    std::cout << "frame: index=" << index
+              << " fd=" << dma_fd
+              << " used=" << used
+              << " total=" << total << std::endl;
+
+    // 2. Кладём пакет в декодер
+    int pret = mpp.put_packet(dst, used);
+    if (pret < 0) {
+        std::cout << "put_packet_dma error" << std::endl;
+        break;
+    }
+
+    // 3. Сразу возвращаем буфер камере
+    if (ioctl(cam_v4l2.fd, VIDIOC_QBUF, &v4l2buf) < 0) {
+        perror("VIDIOC_QBUF");
+    }
+
+    // 4. Пытаемся вытащить ВСЕ готовые кадры
+    while (!stop) {
+        MppFrame frame = nullptr;
+        MPP_RET ret = mpp.mpi->decode_get_frame(mpp.ctx, &frame);
+
+        if (ret != MPP_OK) {
+            // реальная ошибка
+            std::cout << "decode_get_frame ret=" << ret << std::endl;
+            break;
+        }
+
+        if (!frame) {
+            // на сейчас нет кадров – выходим из внутреннего цикла
+            break;
+        }
+
+        if (mpp_frame_get_info_change(frame)) {
+            mpp.handle_info_change(mpp.ctx, mpp.mpi, frame, mpp.ext_group, mpp.ext_group_inited);
+            mpp_frame_deinit(&frame);
+            continue;
+        }
+
+        if (mpp_frame_get_errinfo(frame)) {
+            // битый кадр
+            mpp_frame_deinit(&frame);
+            continue;
+        }
+
+        // Тут у тебя валидный декодированный кадр
+        std::cout << "got decoded frame " << frame << std::endl;
+
+        // На первом шаге – НИЧЕГО с ним не делаем, только освобождаем:
+        mpp_frame_deinit(&frame);
+    }
+}
 
 }
 
@@ -436,7 +552,7 @@ void start_pipeline_for_v4l2_camera() {
 
     signal(SIGINT, sigint_handler);
 
-    V4L2Camera cam_v4l2;
+    
 
     int w = result["input-width"].as<int>();
     int h = result["input-height"].as<int>();
@@ -462,15 +578,15 @@ void start_pipeline_for_v4l2_camera() {
         HailoNN* hailo = new HailoNN(result["model-path"].as<std::string>());
         NN = hailo;
     }
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    // std::thread capture_thread(start_capture_v4l2, &cam_v4l2);
-    // return;
-    std::thread decode_thread(start_decode);
+    std::thread test(start_test);
+    test.join();
+    // auto start = std::chrono::high_resolution_clock::now();
+    // std::thread capture_thread(start_capture_v4l2);
+    // std::thread decode_thread(start_decode);
     // std::thread convert_thread(start_convert_v4l2);
     
 
-    return;
+
     // std::thread draw_thread;
     // if (result.count("nodisplay") == 0) { 
     //     draw_thread = std::thread(start_draw);
@@ -498,9 +614,9 @@ void start_pipeline_for_v4l2_camera() {
     // std::chrono::duration<double, std::milli> dura = end - start;
 
     // std::cout << "AVERAGE FPS = " << count / (dura.count() / 1000) << std::endl;
-    // cam_v4l2.destroy();
+    cam_v4l2.destroy();
 
-    // drm_destroy();
+    drm_destroy();
 }
 
 void start_pipeline_for_gx_camera() {

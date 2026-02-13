@@ -121,9 +121,9 @@ int V4L2Camera::init(std::string path) {
     }
 
     struct v4l2_requestbuffers req = {0};
-    req.count = 6;
+    req.count = 10;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    req.memory = V4L2_MEMORY_DMABUF;
+    req.memory = V4L2_MEMORY_MMAP;
     if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
         perror("VIDIOC_REQBUFS");
         return 1;
@@ -131,22 +131,33 @@ int V4L2Camera::init(std::string path) {
 
     
 
-    for (int i = 0; i < 6; i++) {
-        struct v4l2_exportbuffer buf = {0};
+    for (int i = 0; i < req.count; i++) {
 
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.index = i;
-        buf.plane = 0;
-        buf.flags = O_CLOEXEC;
+        struct v4l2_buffer buf = {};
+        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index  = i;
+
+        if (ioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
+            perror("VIDIOC_QUERYBUF");
+            return 1;
+        }
+
+        struct v4l2_exportbuffer exp_buf = {0};
+
+        exp_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        exp_buf.index = i;
+        exp_buf.plane = 0;
+        exp_buf.flags = O_CLOEXEC;
 
 
-        if (ioctl(fd, VIDIOC_EXPBUF, &buf) < 0) {
+        if (ioctl(fd, VIDIOC_EXPBUF, &exp_buf) < 0) {
             perror("VIDIOC_EXPBUF");
             return 1;
         }
 
-        buffers[i] = buf.fd;
-
+        buffers[i] = exp_buf.fd;
+        sizes[i] = buf.length;
         if(ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
             perror("VIDIOC_QBUF");
             return 1;

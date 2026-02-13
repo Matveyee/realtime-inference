@@ -80,7 +80,8 @@ class V4L2Camera : AbstractCamera {
 
         struct v4l2_format fmt;
         int fd;
-        int buffers[6];
+        int buffers[10];
+        int sizes[6];
 
         int init(std::string path);
 

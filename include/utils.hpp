@@ -16,6 +16,14 @@
 #endif
 #include <unistd.h>
 
+
+#define RED     "\033[31m"
+#define GREEN   "\033[32m"
+#define YELLOW  "\033[33m"
+#define BLUE    "\033[34m"
+#define RESET   "\033[0m"
+#define SIZE 640
+
 #define DEBUG true
 // #include "hailo/hailort.hpp"
 
@@ -79,6 +87,7 @@ public:
 
 
 void log(std::string message);
+void error(std::string err, int code);
 
 
 void draw_line(uint8_t* map, int x, int y, int x1, int y1, uint32_t pitch);

@@ -5,6 +5,11 @@ void log(std::string message) {
     if (DEBUG)
         std::cout << "DEBUG: " << message << std::endl;
 }
+void error(std::string err, int code) {
+    
+    std::cout << RED << "ERROR: " << err << code << RESET << std::endl;
+
+}
 
 uint16_t modbus_crc16( const unsigned char *buf, unsigned int len ) {
 	uint16_t crc = 0xFFFF;
