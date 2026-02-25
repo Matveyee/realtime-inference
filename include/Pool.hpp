@@ -5,6 +5,8 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <cstring>
+#include <iostream>
+#include <thread>
 
 class DMAPoolBufferObject {
 
@@ -73,6 +75,7 @@ template<typename PoolBufferObject, int size>
 PoolBufferObject Pool<PoolBufferObject, size>::capture() {
 
     int index = 0;
+    auto start = std::chrono::high_resolution_clock::now();
     while (true) {
         
         PoolBufferObject pbo = array[index];
@@ -81,6 +84,11 @@ PoolBufferObject Pool<PoolBufferObject, size>::capture() {
             pbo.capture();
             return pbo;
         } else {
+            auto end = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double, std::milli> duration = end - start;
+            if (duration.count() > 100) {
+                std::cout << "too long capturing buffer" << std::endl;
+            }
             if (index == size - 1) {
                 index = -1;
             }

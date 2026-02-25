@@ -98,23 +98,32 @@ void V4L2Camera::setWidth(int w) {
 
     fmt.fmt.pix.width = w;
 
+
 }
 
 void V4L2Camera::setHeight(int h) {
 
     fmt.fmt.pix.height = h;
 
+
 }
 
 int V4L2Camera::init(std::string path) {
 
     fd = open(path.c_str(), O_RDWR);
+   
+}
+
+int V4L2Camera::setResolution(int w, int h) {
     fmt = {0};
 
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
     fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
     fmt.fmt.pix.field = V4L2_FIELD_NONE;
+
+    setWidth(w);
+    setHeight(h);
     if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
         perror("VIDIOC_S_FMT");
         return 1;

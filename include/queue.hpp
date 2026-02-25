@@ -41,10 +41,7 @@ void Queue<T>::push(T item) {
     queue_.push(item);
     size++;
     self_mutex.unlock();
-    // if (size >= size_limit) {
-    //     log("MUTEX: blocked in queue thread");
-    //     size_mutex.lock();
-    // }
+
 
 }
 
@@ -66,9 +63,7 @@ void Queue<T>::pop() {
     queue_.pop();
     size--;
     self_mutex.unlock();
-    // if (size < size_limit) {
-    //     size_mutex.unlock();
-    // }
+
 }
 
 template <typename T>

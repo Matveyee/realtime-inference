@@ -1,305 +1,295 @@
-// minimal_v4l2_mpp_mjpeg.cpp
-
 #include <iostream>
 #include <vector>
 #include <cstring>
-#include <cstdlib>
+#include <cerrno>
 
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/select.h>
 
 #include <linux/videodev2.h>
 
-// Заголовки MPP (пути могут отличаться в вашей системе)
 extern "C" {
 #include "include/inc/rk_mpi.h"
-#include "include/inc/mpp_frame.h"
 #include "include/inc/mpp_packet.h"
-#include "include/inc/mpp_log.h"
+#include "include/inc/mpp_frame.h"
+// #include "mpp_dec_cfg.h"
 }
 
-#define CAM_DEV        "/dev/video40"
-#define CAM_WIDTH      1920
-#define CAM_HEIGHT     1080
-#define V4L2_BUFFERS   4
-#define MAX_FRAME_SIZE (4 * 1024 * 1024) // максимум под один MJPEG кадр
+static void die(const char* msg) {
+    perror(msg);
+    std::exit(1);
+}
 
-struct V4L2Buffer {
-    void   *start = nullptr;
-    size_t  length = 0;
+struct MMapBuf {
+    void*  ptr = nullptr;
+    size_t len = 0;
 };
 
+
+
+
+static MppBufferGroup out_grp = nullptr;
+
+static void on_info_change(MppCtx ctx, MppApi* mpi, MppFrame frame) {
+    RK_U32 w  = mpp_frame_get_width(frame);
+    RK_U32 h  = mpp_frame_get_height(frame);
+    RK_U32 hs = mpp_frame_get_hor_stride(frame);
+    RK_U32 vs = mpp_frame_get_ver_stride(frame);
+    RK_U32 buf_size = mpp_frame_get_buf_size(frame);
+
+    std::cerr << "[INFO_CHANGE] " << w << "x" << h
+              << " stride " << hs << "x" << vs
+              << " buf_size=" << buf_size << "\n";
+
+    if (!out_grp) {
+        // ВНУТРЕННЯЯ группа (самый простой режим)
+        // Тип может быть ION/DRM в зависимости от сборки MPP.
+        // На многих RK работает MPP_BUFFER_TYPE_ION.
+        MPP_RET ret = mpp_buffer_group_get_internal(&out_grp, MPP_BUFFER_TYPE_ION);
+        if (ret) {
+            std::cerr << "mpp_buffer_group_get_internal ret=" << ret << "\n";
+            return;
+        }
+
+        // Ограничиваем пул: например, 24 кадра по buf_size
+        ret = mpp_buffer_group_limit_config(out_grp, buf_size, 24);
+        if (ret) {
+            std::cerr << "mpp_buffer_group_limit_config ret=" << ret << "\n";
+            return;
+        }
+
+        ret = mpi->control(ctx, MPP_DEC_SET_EXT_BUF_GROUP, out_grp);
+        if (ret) {
+            std::cerr << "MPP_DEC_SET_EXT_BUF_GROUP ret=" << ret << "\n";
+            return;
+        }
+    }
+
+    // Разрешаем декодеру продолжать
+    MPP_RET ret = mpi->control(ctx, MPP_DEC_SET_INFO_CHANGE_READY, nullptr);
+    if (ret) {
+        std::cerr << "MPP_DEC_SET_INFO_CHANGE_READY ret=" << ret << "\n";
+    }
+}
+
+int put_with_retry(MppCtx ctx, MppApi* mpi, MppPacket pkt) {
+    for (;;) {
+        MPP_RET ret = mpi->decode_put_packet(ctx, pkt);
+        std::cerr << "decode_put_packet ret=" << ret << "\n";
+        if (ret == MPP_OK) return 0;
+
+        if (ret != MPP_ERR_BUFFER_FULL) {
+            std::cerr << "decode_put_packet ret=" << ret << "\n";
+            return -1;
+        }
+
+        // очередь полна — выкачиваем кадры
+        while (true) {
+            MppFrame frame = nullptr;
+            MPP_RET gr = mpi->decode_get_frame(ctx, &frame);
+            std::cerr << "decode_get_frame ret=" << ret << "\n";
+            if (ret == MPP_ERR_BUFFER_FULL) {
+                return -1;
+            }
+            if (gr != MPP_OK) break;
+            if (!frame) break;
+
+            if (mpp_frame_get_info_change(frame)) {
+                // обработаем ниже (см. пункт 2)
+                // ...
+                on_info_change(ctx, mpi, frame);
+            }
+            mpp_frame_deinit(&frame);
+        }
+
+        usleep(1000);
+    }
+}
+
 int main() {
-    int ret = 0;
+    const char* dev = "/dev/video40";
+    const int   req_w = 1280;
+    const int   req_h = 720;
+    const int   buf_count = 4;
 
-    // ========= 1. Открываем камеру =========
-    int cam_fd = open(CAM_DEV, O_RDWR | O_NONBLOCK);
-    if (cam_fd < 0) {
-        perror("open camera");
-        return 1;
-    }
+    // 1) Open camera (BLOCKING проще для старта)
+    int fd = open(dev, O_RDWR);
+    if (fd < 0) die("open");
 
-    // (не обязательно, но полезно) проверим возможности
-    struct v4l2_capability cap = {};
-    if (ioctl(cam_fd, VIDIOC_QUERYCAP, &cap) < 0) {
-        perror("VIDIOC_QUERYCAP");
-        close(cam_fd);
-        return 1;
-    }
-
-    if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
-        std::cerr << "Device is not a capture device\n";
-        close(cam_fd);
-        return 1;
-    }
-
-    if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
-        std::cerr << "Device does not support streaming I/O\n";
-        close(cam_fd);
-        return 1;
-    }
-
-    // ========= 2. Настраиваем формат (MJPEG) =========
-    struct v4l2_format fmt = {};
-    fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width       = CAM_WIDTH;
-    fmt.fmt.pix.height      = CAM_HEIGHT;
+    // 2) Set format: MJPEG
+    v4l2_format fmt{};
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmt.fmt.pix.width = req_w;
+    fmt.fmt.pix.height = req_h;
     fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-    fmt.fmt.pix.field       = V4L2_FIELD_ANY;
+    fmt.fmt.pix.field = V4L2_FIELD_ANY;
 
-    if (ioctl(cam_fd, VIDIOC_S_FMT, &fmt) < 0) {
-        perror("VIDIOC_S_FMT");
-        close(cam_fd);
-        return 1;
-    }
+    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) die("VIDIOC_S_FMT");
 
-    std::cout << "Camera format set: "
-              << fmt.fmt.pix.width << "x" << fmt.fmt.pix.height
-              << " fourcc=" << std::hex << fmt.fmt.pix.pixelformat << std::dec
-              << std::endl;
+    std::cout << "V4L2 format: " << fmt.fmt.pix.width << "x" << fmt.fmt.pix.height
+              << " fourcc=0x" << std::hex << fmt.fmt.pix.pixelformat << std::dec << "\n";
 
-    // ========= 3. Запрашиваем буферы MMAP =========
-    struct v4l2_requestbuffers req = {};
-    req.count  = V4L2_BUFFERS;
-    req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    // 3) Request MMAP buffers
+    v4l2_requestbuffers req{};
+    req.count = buf_count;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
 
-    if (ioctl(cam_fd, VIDIOC_REQBUFS, &req) < 0) {
-        perror("VIDIOC_REQBUFS");
-        close(cam_fd);
-        return 1;
-    }
-
-    if (req.count < V4L2_BUFFERS) {
+    if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0) die("VIDIOC_REQBUFS");
+    if (req.count < 2) {
         std::cerr << "Not enough V4L2 buffers\n";
-        close(cam_fd);
         return 1;
     }
 
-    std::vector<V4L2Buffer> buffers(req.count);
+    std::vector<MMapBuf> bufs(req.count);
 
-    for (unsigned int i = 0; i < req.count; ++i) {
-        struct v4l2_buffer buf = {};
-        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.index  = i;
+    for (unsigned i = 0; i < req.count; ++i) {
+        v4l2_buffer b{};
+        b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        b.memory = V4L2_MEMORY_MMAP;
+        b.index = i;
 
-        if (ioctl(cam_fd, VIDIOC_QUERYBUF, &buf) < 0) {
-            perror("VIDIOC_QUERYBUF");
-            close(cam_fd);
-            return 1;
-        }
+        if (ioctl(fd, VIDIOC_QUERYBUF, &b) < 0) die("VIDIOC_QUERYBUF");
 
-        buffers[i].length = buf.length;
-        buffers[i].start = mmap(nullptr, buf.length,
-                                PROT_READ | PROT_WRITE,
-                                MAP_SHARED,
-                                cam_fd,
-                                buf.m.offset);
-        if (buffers[i].start == MAP_FAILED) {
-            perror("mmap");
-            close(cam_fd);
-            return 1;
-        }
+        bufs[i].len = b.length;
+        bufs[i].ptr = mmap(nullptr, b.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, b.m.offset);
+        if (bufs[i].ptr == MAP_FAILED) die("mmap");
 
-        // Ставим буфер в очередь
-        if (ioctl(cam_fd, VIDIOC_QBUF, &buf) < 0) {
-            perror("VIDIOC_QBUF");
-            close(cam_fd);
-            return 1;
-        }
+        if (ioctl(fd, VIDIOC_QBUF, &b) < 0) die("VIDIOC_QBUF");
     }
 
-    // ========= 4. Запускаем стрим камеры =========
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(cam_fd, VIDIOC_STREAMON, &type) < 0) {
-        perror("VIDIOC_STREAMON");
-        close(cam_fd);
+    // 4) STREAMON
+    v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) die("VIDIOC_STREAMON");
+
+    // 5) Init MPP decoder (MJPEG)
+    MppCtx ctx = nullptr;
+    MppApi* mpi = nullptr;
+
+    if (mpp_create(&ctx, &mpi) != MPP_OK) {
+        std::cerr << "mpp_create failed\n";
+        return 1;
+    }
+    if (mpp_init(ctx, MPP_CTX_DEC, MPP_VIDEO_CodingMJPEG) != MPP_OK) {
+        std::cerr << "mpp_init MJPEG failed\n";
         return 1;
     }
 
-    // ========= 5. Инициализируем MPP (MJPEG декодер) =========
-    MppCtx ctx  = nullptr;
-    MppApi *mpi = nullptr;
+    // // В стиле mpi_dec_test: включим split_parse (на всякий случай)
+    // {
+    //     MppDecCfg cfg = nullptr;
+    //     mpp_dec_cfg_init(&cfg);
+    //     mpi->control(ctx, MPP_DEC_GET_CFG, cfg);
+    //     mpp_dec_cfg_set_u32(cfg, "base:split_parse", 1);
+    //     mpi->control(ctx, MPP_DEC_SET_CFG, cfg);
+    //     mpp_dec_cfg_deinit(cfg);
+    // }
 
-    ret = mpp_create(&ctx, &mpi);
-    if (ret) {
-        std::cerr << "mpp_create failed: " << ret << std::endl;
-        return 1;
-    }
-
-    // Можно включить лог MPP покруче для отладки
-    // mpp_log_set_flag(0xFFFFFFFF);
-
-    ret = mpp_init(ctx, MPP_CTX_DEC, MPP_VIDEO_CodingMJPEG);
-    if (ret) {
-        std::cerr << "mpp_init MJPEG failed: " << ret << std::endl;
-        return 1;
-    }
-
-    // Опционально — игнорировать ошибки потока, чтобы декодер пытался выводить кадры
+    // Optional: не отбрасывать кадры из-за ошибок потока на старте отладки
     {
         RK_U32 disable_err = 1;
         mpi->control(ctx, MPP_DEC_SET_DISABLE_ERROR, &disable_err);
     }
 
-    std::cout << "MPP MJPEG decoder inited\n";
+    // Packet (как в mpi_dec_test simple): один раз init, потом переиспользуем
+    MppPacket pkt = nullptr;
+    if (mpp_packet_init(&pkt, nullptr, 0) != MPP_OK) {
+        std::cerr << "mpp_packet_init failed\n";
+        return 1;
+    }
 
-    // Буфер для копии JPEG (чтобы не париться с lifetime MPP)
-    std::vector<uint8_t> jpeg_buf(MAX_FRAME_SIZE);
+    int decoded = 0;
 
-    int frame_count = 0;
+    // 6) Main loop
+    while (decoded < 100) {
+        // Ждём готовый буфер через select (стабильно и без EAGAIN-спама)
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        timeval tv{2, 0};
+        v4l2_buffer b{};
+        b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        b.memory = V4L2_MEMORY_MMAP;
 
-    // ========= 6. Главный цикл захвата + декодирования =========
-    while (frame_count < 100) { // для примера остановимся на 100 кадрах
-        // 6.1 Ждём кадр: DQBUF
-        struct v4l2_buffer v4l2buf = {};
-        v4l2buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        v4l2buf.memory = V4L2_MEMORY_MMAP;
+        std::cerr << "before DQBUF" << std::endl;
+        if (ioctl(fd, VIDIOC_DQBUF, &b) < 0) die("VIDIOC_DQBUF");
+        std::cerr << "after DQBUF bytesused=" << b.bytesused << " index=" << b.index << std::endl;
 
-        // Блокирующий ожидание удобнее: если NONBLOCK — можно через select/poll
-        if (ioctl(cam_fd, VIDIOC_DQBUF, &v4l2buf) < 0) {
-            perror("VIDIOC_DQBUF");
-            usleep(1000);
+
+
+        b.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        b.memory = V4L2_MEMORY_MMAP;
+
+        if (ioctl(fd, VIDIOC_DQBUF, &b) < 0) die("VIDIOC_DQBUF");
+
+        const int idx = b.index;
+        const size_t used = b.bytesused;
+
+        if (used == 0 || used > bufs[idx].len) {
+            std::cerr << "Bad bytesused=" << used << " buf_len=" << bufs[idx].len << "\n";
+            if (ioctl(fd, VIDIOC_QBUF, &b) < 0) die("VIDIOC_QBUF");
             continue;
         }
 
-        int index = v4l2buf.index;
-        size_t used = v4l2buf.bytesused;
-        if (used == 0 || used > MAX_FRAME_SIZE) {
-            std::cerr << "Bad frame size: " << used << std::endl;
-            // Вернём буфер и дальше
-            ioctl(cam_fd, VIDIOC_QBUF, &v4l2buf);
-            continue;
+        // 6.1) Feed MPP with MJPEG bytes from MMAP buffer
+        void* data = bufs[idx].ptr;
+        mpp_packet_set_data(pkt, data);
+        mpp_packet_set_pos(pkt, data);
+        mpp_packet_set_size(pkt, bufs[idx].len);   // capacity
+        mpp_packet_set_length(pkt, used);          // actual bytes
+
+        int r = put_with_retry(ctx, mpi, pkt);
+        std::cerr << "put_with_retry ret=" << r << std::endl;
+        if (r && r != MPP_ERR_BUFFER_FULL) {
+            std::cerr << "decode_put_packet ret=" << r << "\n";
         }
 
-        std::cout << "[V4L2] got buffer index=" << index
-                  << " bytesused=" << used << std::endl;
+        // 6.2) Return buffer to camera ASAP
+        if (ioctl(fd, VIDIOC_QBUF, &b) < 0) die("VIDIOC_QBUF");
 
-        // 6.2 Копируем MJPEG кадр в обычный буфер
-        std::memcpy(jpeg_buf.data(), buffers[index].start, used);
-
-        // 6.3 Готовим MppPacket поверх этого буфера
-        MppPacket packet = nullptr;
-        ret = mpp_packet_init(&packet, jpeg_buf.data(), MAX_FRAME_SIZE);
-        if (ret) {
-            std::cerr << "mpp_packet_init failed: " << ret << std::endl;
-            ioctl(cam_fd, VIDIOC_QBUF, &v4l2buf);
-            continue;
-        }
-        mpp_packet_set_length(packet, used);
-        mpp_packet_set_pos(packet, jpeg_buf.data());
-
-        // 6.4 Кладём пакет в декодер
-        ret = mpi->decode_put_packet(ctx, packet);
-        if (ret && ret != MPP_ERR_BUFFER_FULL) {
-            std::cerr << "decode_put_packet failed: " << ret << std::endl;
-            mpp_packet_deinit(&packet);
-            ioctl(cam_fd, VIDIOC_QBUF, &v4l2buf);
-            break;
-        }
-        mpp_packet_deinit(&packet);
-
-        // 6.5 Возвращаем буфер камере
-        if (ioctl(cam_fd, VIDIOC_QBUF, &v4l2buf) < 0) {
-            perror("VIDIOC_QBUF");
-            break;
-        }
-
-        // 6.6 Пытаемся вытащить все готовые декодированные кадры
+        // 6.3) Drain all available frames
         while (true) {
             MppFrame frame = nullptr;
-            ret = mpi->decode_get_frame(ctx, &frame);
-            if (ret != MPP_OK) {
-                std::cerr << "decode_get_frame ret=" << ret << std::endl;
+            MPP_RET gr = mpi->decode_get_frame(ctx, &frame);
+            if (gr != MPP_OK) {
+                std::cerr << "decode_get_frame ret=" << gr << "\n";
                 break;
             }
-
-            if (!frame) {
-                // на сейчас готовых кадров нет
-                break;
-            }
+            if (!frame) break;
 
             if (mpp_frame_get_info_change(frame)) {
-                int w  = mpp_frame_get_width(frame);
-                int h  = mpp_frame_get_height(frame);
-                int hs = mpp_frame_get_hor_stride(frame);
-                int vs = mpp_frame_get_ver_stride(frame);
-                size_t buf_size = mpp_frame_get_buf_size(frame);
-
-                std::cout << "[MPP] INFO_CHANGE: " << w << "x" << h
-                          << " stride " << hs << "x" << vs
-                          << " buf_size " << buf_size << std::endl;
-
-                // Ничего внешнего не настраиваем — используем внутренние буферы MPP
-                mpi->control(ctx, MPP_DEC_SET_INFO_CHANGE_READY, nullptr);
+                on_info_change(ctx, mpi, frame);
                 mpp_frame_deinit(&frame);
                 continue;
             }
 
             int err = mpp_frame_get_errinfo(frame);
-            int dsc = mpp_frame_get_discard(frame);
-            if (err || dsc) {
-                std::cout << "[MPP] frame err=" << err
-                          << " discard=" << dsc << std::endl;
-                mpp_frame_deinit(&frame);
-                continue;
-            }
-
-            int out_w = mpp_frame_get_width(frame);
-            int out_h = mpp_frame_get_height(frame);
-            std::cout << "[MPP] GOT DECODED FRAME #" << frame_count
-                      << " " << out_w << "x" << out_h << std::endl;
-
-            // Здесь можно получить MppBuffer с NV12 и что-то с ним сделать
-            // MppBuffer frame_buf = mpp_frame_get_buffer(frame);
-            // void *ptr = mpp_buffer_get_ptr(frame_buf);
-            // size_t frame_size = mpp_frame_get_buf_size(frame);
+            int disc = mpp_frame_get_discard(frame);
+            std::cerr << "frame: " << mpp_frame_get_width(frame) << "x"
+                    << mpp_frame_get_height(frame)
+                    << " err=" << err << " discard=" << disc << "\n";
 
             mpp_frame_deinit(&frame);
-            frame_count++;
         }
     }
 
-    std::cout << "Decoded " << frame_count << " frames\n";
+    std::cout << "Decoded frames: " << decoded << "\n";
 
-    // ========= 7. Остановка и очистка =========
+    // cleanup
+    mpp_packet_deinit(&pkt);
+    mpi->reset(ctx);
+    mpp_destroy(ctx);
+
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    ioctl(cam_fd, VIDIOC_STREAMOFF, &type);
+    ioctl(fd, VIDIOC_STREAMOFF, &type);
 
-    for (auto &b : buffers) {
-        if (b.start && b.length)
-            munmap(b.start, b.length);
+    for (auto& mb : bufs) {
+        if (mb.ptr && mb.len)
+            munmap(mb.ptr, mb.len);
     }
-
-    close(cam_fd);
-
-    if (ctx && mpi) {
-        mpi->reset(ctx);
-        mpp_destroy(ctx);
-    }
-
+    close(fd);
     return 0;
 }

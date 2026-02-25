@@ -5,13 +5,13 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "${workspaceFolder}/include",
-                "${workspaceFolder}/third-party/cxxopts/include",
+                "${workspaceFolder}/third-party/cxxopts/include"
             ],
             "defines": [],
-            "compilerPath": "/usr/bin/clang-11",
+            "compilerPath": "/usr/bin/gcc",
             "cStandard": "c17",
             "cppStandard": "c++14",
-            "intelliSenseMode": "linux-clang-arm64"
+            "intelliSenseMode": "linux-gcc-arm64"
         }
     ],
     "version": 4

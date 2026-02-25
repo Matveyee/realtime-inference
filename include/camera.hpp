@@ -4,7 +4,6 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
-
 #ifndef CAMERA.HPP
 #define CAMERA.HPP
 // Abstract class, with callback function type as a parameter
@@ -96,6 +95,8 @@ class V4L2Camera : AbstractCamera {
         void startCapture() override;
 
         void stopCapture() override;
+
+        int setResolution(int w, int h);
 
         void getBuffer(struct v4l2_buffer** buf);
 
