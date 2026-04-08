@@ -1,9 +1,9 @@
 
-#ifndef NEURALNETWORK.HPP
-#define NEURALNETWORK.HPP
+#ifndef NEURALNETWORK_HPP
+#define NEURALNETWORK_HPP
 
 #include "hailo/hailort.hpp"
-#include "../include/utils.hpp"
+// #include "../include/utils.hpp"
 
 
 
@@ -45,7 +45,7 @@ typedef struct {
     void* input_buffer;
     int fd;
     void* output_buffer;
-    Projection proj;
+    // Projection proj;
 
     
 

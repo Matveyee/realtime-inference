@@ -66,11 +66,10 @@ void HailoNN::inference(standart_inference_ctx* ctx) {
         //free(ctx->output_buffer);
         log("input free success");
         
-        auto bboxes = parse_nms_data((uint8_t*)ctx->output_buffer, 80);
+         auto bboxes = parse_nms_data((uint8_t*)ctx->output_buffer, 80);
 
         free(ctx->output_buffer);
-        draw_bounding_boxes(map, bboxes, 640, 640, pitch, ctx->proj);
-        delete[] ctx;
+        // draw_bounding_boxes(map, bboxes, 640, 640, pitch, ctx->proj);
    
     }).expect("Failed to start async infer job");
     
@@ -78,7 +77,7 @@ void HailoNN::inference(standart_inference_ctx* ctx) {
 }
 
 void HailoNN::inference_dmabuf(standart_inference_ctx* ctx) {
-
+    std::cout << "entered inference" << std::endl;
     auto &infer_model1 = configured_infer_model;
 
     // создаём bindings
@@ -154,12 +153,43 @@ void HailoNN::inference_dmabuf(standart_inference_ctx* ctx) {
         log("Inferenced");
         // free(ctx->input_buffer);
         //free(ctx->output_buffer);
-        log("input free success");
-        
-        auto bboxes = parse_nms_data((uint8_t*)ctx->output_buffer, 80);
+        // log("input free success");
+        std::cout << "parsing data" << std::endl;
+        auto bboxes = parse_nms_data(output_buffers.data()->get(), 80);
+        std::cout << "parsed data" << std::endl;
+        // free(ctx->output_buffer);
+        uint32_t pitches[4] = {
+            640 * 3, 
+            0, 0, 0
+        };
+        uint32_t offsets[4] = {
+            0,
+            0, 0, 0
+        };
 
-        free(ctx->output_buffer);
-        draw_bounding_boxes(map, bboxes, 640, 640, pitch, ctx->proj);
+        uint32_t plane_id = find_plane_for_format(drm.fd, drm.res, drm.crtc_id, DRM_FORMAT_BGR888);
+        if (!plane_id) {
+            std::cerr << "No plane supports format " << std::hex << DRM_FORMAT_BGR888 << std::dec << "\n";
+            return false;
+        }
+
+        drm_show_dmabuf(
+            drm,
+            ctx->fd,
+            640,
+            640,
+            DRM_FORMAT_BGR888,
+            pitches,
+            offsets,
+            plane_id
+        );
+
+        OverlayPlane overlay;
+        drm_create_overlay_plane(drm, overlay, plane_id);
+
+        // 4. Рисовать bbox
+        overlay_draw_bboxes(overlay, bboxes);
+
         delete[] ctx;
    
     }).expect("Failed to start async infer job");

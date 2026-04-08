@@ -15,7 +15,7 @@
 #include <sys/mman.h>
 #endif
 #include <unistd.h>
-
+#include <hailoNN.hpp>
 
 #define RED     "\033[31m"
 #define GREEN   "\033[32m"
@@ -39,6 +39,10 @@ extern uint32_t pitch;
 extern uint64_t size;
 extern struct drm_mode_fb_cmd fb;
 
+struct NamedBbox {
+    hailo_bbox_float32_t bbox;
+    size_t class_id;
+};
 
 uint16_t modbus_crc16( const unsigned char *buf, unsigned int len );
 
@@ -114,8 +118,34 @@ struct DrmContext {
     uint32_t crtc_id = 0;
     drmModeModeInfo mode = {};
 };
-uint32_t find_plane_for_format(int drm_fd, drmModeRes* res, uint32_t crtc_id, uint32_t fourcc);
+extern DrmContext drm;
 
+struct OverlayPlane {
+    uint32_t plane_id = 0;
+
+    uint32_t fb_id = 0;
+    uint32_t handle = 0;
+    uint32_t pitch = 0;
+    uint64_t size = 0;
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+
+    uint8_t* map = nullptr;
+
+    // Для удобства — положение overlay на экране
+    int dst_x = 0;
+    int dst_y = 0;
+    int dst_w = 0;
+    int dst_h = 0;
+};
+
+
+uint32_t find_plane_for_format(int drm_fd,
+                                      drmModeRes* res,
+                                      uint32_t crtc_id,
+                                      uint32_t fourcc,
+                                      uint32_t avoid_plane_id = 0);
 bool import_dmabuf_to_fb(
     int drm_fd,
     int dmabuf_fd,
@@ -134,8 +164,18 @@ bool drm_show_dmabuf(
     uint32_t height,
     uint32_t fourcc,
     const uint32_t pitches[4],
-    const uint32_t offsets[4]
+    const uint32_t offsets[4],
+    uint32_t plane_id
 );
+
+bool drm_create_overlay_plane(DrmContext& drm,
+                              OverlayPlane& ovl,
+                              uint32_t video_plane_id = 0);
+
+void overlay_draw_bboxes(OverlayPlane& ovl,
+                         const std::vector<NamedBbox>& boxes,
+                         float score_threshold = 0.25f,
+                         int thickness = 2);
 bool drm_init(DrmContext& drm);
 void drm_init();
 void drm_destroy();

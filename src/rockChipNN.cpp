@@ -1,5 +1,6 @@
 #include "../include/rockChipNN.hpp"
 #include "../include/rockChipPostprocess.hpp"
+#include <iostream>
 
 RockChipNN::RockChipNN(std::string model_path) {
     init(model_path);

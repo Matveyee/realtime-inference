@@ -1,4 +1,7 @@
 #include "../include/utils.hpp"
+#include <cstring>
+
+#include <algorithm>
 
 
 void log(std::string message) {
@@ -49,6 +52,7 @@ uint32_t crtc_id;
 drmModeModeInfo mode;
 int drm_fd;
 struct drm_mode_fb_cmd fb = {};
+DrmContext drm;
 
 
 
@@ -315,7 +319,12 @@ void drawPicture(int fd, int w, int h) {
     // current_handle = handle;
 }
 
-uint32_t find_plane_for_format(int drm_fd, drmModeRes* res, uint32_t crtc_id, uint32_t fourcc) {
+uint32_t find_plane_for_format(int drm_fd,
+                                      drmModeRes* res,
+                                      uint32_t crtc_id,
+                                      uint32_t fourcc,
+                                      uint32_t avoid_plane_id)
+{
     drmModePlaneRes* plane_res = drmModeGetPlaneResources(drm_fd);
     if (!plane_res) {
         perror("drmModeGetPlaneResources");
@@ -340,7 +349,12 @@ uint32_t find_plane_for_format(int drm_fd, drmModeRes* res, uint32_t crtc_id, ui
         if (!plane)
             continue;
 
-        bool crtc_ok = plane->possible_crtcs & (1u << crtc_index);
+        if (plane->plane_id == avoid_plane_id) {
+            drmModeFreePlane(plane);
+            continue;
+        }
+
+        bool crtc_ok = (plane->possible_crtcs & (1u << crtc_index)) != 0;
         bool fmt_ok = false;
 
         for (uint32_t j = 0; j < plane->count_formats; ++j) {
@@ -350,15 +364,15 @@ uint32_t find_plane_for_format(int drm_fd, drmModeRes* res, uint32_t crtc_id, ui
             }
         }
 
-        uint32_t plane_id = 0;
+        uint32_t found = 0;
         if (crtc_ok && fmt_ok)
-            plane_id = plane->plane_id;
+            found = plane->plane_id;
 
         drmModeFreePlane(plane);
 
-        if (plane_id) {
+        if (found) {
             drmModeFreePlaneResources(plane_res);
-            return plane_id;
+            return found;
         }
     }
 
@@ -498,18 +512,15 @@ bool drm_show_dmabuf(
     uint32_t height,
     uint32_t fourcc,
     const uint32_t pitches[4],
-    const uint32_t offsets[4]
+    const uint32_t offsets[4],
+    uint32_t plane_id
 ) {
     if (drm.fd < 0 || !drm.res || !drm.conn || !drm.crtc_id) {
         std::cerr << "DRM is not initialized\n";
         return false;
     }
 
-    uint32_t plane_id = find_plane_for_format(drm.fd, drm.res, drm.crtc_id, fourcc);
-    if (!plane_id) {
-        std::cerr << "No plane supports format " << std::hex << fourcc << std::dec << "\n";
-        return false;
-    }
+    
 
     uint32_t fb_id = 0;
     uint32_t handles[4] = {0, 0, 0, 0};
@@ -529,8 +540,8 @@ bool drm_show_dmabuf(
 
     int dst_x = 0;
     int dst_y = 0;
-    int dst_w = 1920;
-    int dst_h = 1080;
+    int dst_w = 1280;
+    int dst_h = 720;
 
     int ret = drmModeSetPlane(
         drm.fd,
@@ -585,6 +596,234 @@ bool drm_show_dmabuf(
     return true;
 }
 
+static bool set_plane_prop_by_name(int drm_fd,
+                                   uint32_t plane_id,
+                                   const char* prop_name,
+                                   uint64_t value)
+{
+    drmModeObjectProperties* props =
+        drmModeObjectGetProperties(drm_fd, plane_id, DRM_MODE_OBJECT_PLANE);
+    if (!props)
+        return false;
+
+    bool ok = false;
+
+    for (uint32_t i = 0; i < props->count_props; ++i) {
+        drmModePropertyRes* prop = drmModeGetProperty(drm_fd, props->props[i]);
+        if (!prop)
+            continue;
+
+        if (strcmp(prop->name, prop_name) == 0) {
+            if (drmModeObjectSetProperty(drm_fd,
+                                         plane_id,
+                                         DRM_MODE_OBJECT_PLANE,
+                                         prop->prop_id,
+                                         value) == 0) {
+                ok = true;
+            }
+            drmModeFreeProperty(prop);
+            break;
+        }
+
+        drmModeFreeProperty(prop);
+    }
+
+    drmModeFreeObjectProperties(props);
+    return ok;
+}
+
+bool drm_create_overlay_plane(DrmContext& drm,
+                              OverlayPlane& ovl,
+                              uint32_t video_plane_id)
+{
+    ovl.plane_id = find_plane_for_format(drm.fd,
+                                         drm.res,
+                                         drm.crtc_id,
+                                         DRM_FORMAT_ARGB8888,
+                                         video_plane_id);
+    if (!ovl.plane_id) {
+        std::cerr << "No overlay plane with ARGB8888 found\n";
+        return false;
+    }
+
+    ovl.width = 1280;
+    ovl.height = 720;
+    ovl.dst_x = 0;
+    ovl.dst_y = 0;
+    ovl.dst_w = ovl.width;
+    ovl.dst_h = ovl.height;
+
+    drm_mode_create_dumb create = {};
+    create.width = ovl.width;
+    create.height = ovl.height;
+    create.bpp = 32;
+
+    if (ioctl(drm.fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) != 0) {
+        perror("DRM_IOCTL_MODE_CREATE_DUMB");
+        return false;
+    }
+
+    ovl.handle = create.handle;
+    ovl.pitch = create.pitch;
+    ovl.size = create.size;
+
+    if (drmModeAddFB(drm.fd,
+                     ovl.width,
+                     ovl.height,
+                     24,
+                     32,
+                     ovl.pitch,
+                     ovl.handle,
+                     &ovl.fb_id) != 0) {
+        perror("drmModeAddFB");
+        return false;
+    }
+
+    drm_mode_map_dumb map_dumb = {};
+    map_dumb.handle = ovl.handle;
+    if (ioctl(drm.fd, DRM_IOCTL_MODE_MAP_DUMB, &map_dumb) != 0) {
+        perror("DRM_IOCTL_MODE_MAP_DUMB");
+        return false;
+    }
+
+    ovl.map = (uint8_t*)mmap(nullptr,
+                             ovl.size,
+                             PROT_READ | PROT_WRITE,
+                             MAP_SHARED,
+                             drm.fd,
+                             map_dumb.offset);
+    if (ovl.map == MAP_FAILED) {
+        perror("mmap overlay");
+        ovl.map = nullptr;
+        return false;
+    }
+
+    // Прозрачный фон
+    std::memset(ovl.map, 0, ovl.size);
+
+    // Попробуем поднять plane наверх и включить полную plane alpha
+    set_plane_prop_by_name(drm.fd, ovl.plane_id, "zpos", 10);
+    set_plane_prop_by_name(drm.fd, ovl.plane_id, "alpha", 0xffff);
+
+    // Показываем overlay 1:1 на весь экран
+    if (drmModeSetPlane(drm.fd,
+                        ovl.plane_id,
+                        drm.crtc_id,
+                        ovl.fb_id,
+                        0,
+                        ovl.dst_x,
+                        ovl.dst_y,
+                        ovl.dst_w,
+                        ovl.dst_h,
+                        0 << 16,
+                        0 << 16,
+                        ovl.width << 16,
+                        ovl.height << 16) != 0) {
+        perror("drmModeSetPlane overlay");
+        return false;
+    }
+
+    return true;
+}
+
+static inline void put_pixel_argb8888(OverlayPlane& ovl,
+                                      int x, int y,
+                                      uint32_t argb)
+{
+    if (x < 0 || y < 0 || x >= (int)ovl.width || y >= (int)ovl.height)
+        return;
+
+    uint32_t* row = (uint32_t*)(ovl.map + y * ovl.pitch);
+    row[x] = argb;
+}
+
+static void draw_rect_argb8888(OverlayPlane& ovl,
+                               int x, int y, int w, int h,
+                               uint32_t color,
+                               int thickness = 2)
+{
+    if (w <= 0 || h <= 0)
+        return;
+
+    for (int t = 0; t < thickness; ++t) {
+        int x0 = x + t;
+        int y0 = y + t;
+        int x1 = x + w - 1 - t;
+        int y1 = y + h - 1 - t;
+
+        if (x0 > x1 || y0 > y1)
+            break;
+
+        for (int xx = x0; xx <= x1; ++xx) {
+            put_pixel_argb8888(ovl, xx, y0, color);
+            put_pixel_argb8888(ovl, xx, y1, color);
+        }
+
+        for (int yy = y0; yy <= y1; ++yy) {
+            put_pixel_argb8888(ovl, x0, yy, color);
+            put_pixel_argb8888(ovl, x1, yy, color);
+        }
+    }
+}
+
+void overlay_clear(OverlayPlane& ovl)
+{
+    if (!ovl.map)
+        return;
+    std::memset(ovl.map, 0, ovl.size); // A=0, полностью прозрачно
+}
+
+static uint32_t class_color_argb(size_t class_id)
+{
+    static const uint32_t colors[] = {
+        0xFFFF0000, // красный
+        0xFF00FF00, // зелёный
+        0xFF0000FF, // синий
+        0xFFFFFF00, // жёлтый
+        0xFFFF00FF, // пурпурный
+        0xFF00FFFF, // циан
+        0xFFFF8800, // оранжевый
+        0xFFFFFFFF  // белый
+    };
+    return colors[class_id % (sizeof(colors) / sizeof(colors[0]))];
+}
+
+template <typename T>
+inline T clamp(T v, T lo, T hi)
+{
+    return (v < lo) ? lo : (v > hi) ? hi : v;
+}
+
+void overlay_draw_bboxes(OverlayPlane& ovl,
+                         const std::vector<NamedBbox>& boxes,
+                         float score_threshold ,
+                         int thickness)
+{
+    overlay_clear(ovl);
+
+    for (const auto& nb : boxes) {
+        const auto& b = nb.bbox;
+
+        if (b.score < score_threshold)
+            continue;
+
+        float x0f = clamp(b.x_min, 0.0f, 1.0f);
+        float y0f = clamp(b.y_min, 0.0f, 1.0f);
+        float x1f = clamp(b.x_max, 0.0f, 1.0f);
+        float y1f = clamp(b.y_max, 0.0f, 1.0f);
+
+        int x = (int)(x0f * ovl.width);
+        int y = (int)(y0f * ovl.height);
+        int w = (int)((x1f - x0f) * ovl.width);
+        int h = (int)((y1f - y0f) * ovl.height);
+
+        if (w <= 0 || h <= 0)
+            continue;
+
+        uint32_t color = class_color_argb(nb.class_id);
+        draw_rect_argb8888(ovl, x, y, w, h, color, thickness);
+    }
+}
 void drm_init() {
 
     drm_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);

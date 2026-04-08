@@ -47,7 +47,7 @@ GPIO gpio;
 cxxopts::ParseResult result;
 MPPEntity mpp;
 V4L2Camera cam_v4l2;
-DrmContext drm;
+HailoNN hailo;
 
 
 static const char *mpp_fmt_to_str(MppFrameFormat fmt_id)
@@ -523,29 +523,32 @@ void start_draw_v4l2() {
         if (pic_queue_dmabuf.size <= 0) {
             continue;
         }
-        int fd = pic_queue_dmabuf.read().fd;
-        // uint8_t* img = (uint8_t*)mmap(NULL, 640*640*3, PROT_READ, MAP_SHARED, fd, 0);
-        // drawPicture(img, 640, 640);
-        // munmap(img, 640*640*3);
-        uint32_t pitches[4] = {
-            640 * 3,   // 3 байта на пиксель
-            0, 0, 0
-        };
-        uint32_t offsets[4] = {
-            0,
-            0, 0, 0
-        };
 
-        drm_show_dmabuf(
-            drm,
-            fd,
-            640,
-            640,
-            DRM_FORMAT_BGR888,
-            pitches,
-            offsets
-        );
-        draw_index++;
+        standart_inference_ctx* ctx = new standart_inference_ctx();
+        ctx->fd = pic_queue_dmabuf.read().fd;
+
+        std::cout << "entering inference" << std::endl;
+        hailo.inference_dmabuf(ctx);
+
+        // uint32_t pitches[4] = {
+        //     640 * 3, 
+        //     0, 0, 0
+        // };
+        // uint32_t offsets[4] = {
+        //     0,
+        //     0, 0, 0
+        // };
+
+        // drm_show_dmabuf(
+        //     drm,
+        //     fd,
+        //     640,
+        //     640,
+        //     DRM_FORMAT_BGR888,
+        //     pitches,
+        //     offsets
+        // );
+        // draw_index++;
 
         pic_queue_dmabuf.pop();
 
@@ -573,8 +576,6 @@ void start_convert_v4l2() {
 
         MppBuffer mpp_buffer = mpp_frame_get_buffer(frame);
         int src_fd = mpp_buffer_get_fd(mpp_buffer);
-
-        // NV12 WIDTHxHEIGHT dma-buffer Image
 
         src = wrapbuffer_fd_t(
             src_fd,
@@ -612,12 +613,6 @@ void start_convert_v4l2() {
 
 void start_decode() {
 
-    // FILE *nv12_file = fopen("video_nv12.yuv", "wb");
-    // if (!nv12_file) {
-    //     perror("fopen video_nv12.yuv");
-    //     return;
-    // }
-
     while (true) {
         
         STOP
@@ -628,26 +623,12 @@ void start_decode() {
         MppFrame frame = NULL;
       
         int ret = mpp.mjpeg_decode(cam_v4l2.pointers[  dbqo.buf->index ], dbqo.buf->bytesused, &frame, w, h);
-        // std::cout << "DECODED" << std::endl;
-        // if (ret == -1) {
-        //     stop = 1;
-        //     break;
-        // }
 
         v4l2_queue.pop();
-
-        
-        // if (append_mpp_frame_as_nv12(nv12_file, frame) != 0) {
-        //     std::cerr << "failed to append frame to nv12 file\n";
-        // }
-
-        
         
         decoded_queue.push(frame);
-        // decoded_queue.pop();
         
     }
-    // fclose(nv12_file);
 
 }
 
@@ -783,6 +764,11 @@ void start_pipeline_for_v4l2_camera() {
     
     drm_init(drm);
     
+    OverlayPlane overlay;
+    int video_plane_id = find_plane_for_format(drm.fd, drm.res, drm.crtc_id, DRM_FORMAT_BGR888, 0);
+    if (!drm_create_overlay_plane(drm, overlay, video_plane_id)) {
+        std::cerr << "overlay plane create failed\n";
+    }
 
     signal(SIGINT, sigint_handler);
 
@@ -799,7 +785,9 @@ void start_pipeline_for_v4l2_camera() {
     }
     FPS = (int)result["frame-rate"].as<int>();
     COUNT = (int)result["count"].as<int>();
-
+    if (result.count("debug") == 0) {
+        auto old_buffer = std::cout.rdbuf(nullptr);
+    }
     cam_v4l2.init(result["camera-path"].as<std::string>());
 
     
@@ -808,10 +796,10 @@ void start_pipeline_for_v4l2_camera() {
     mpp.init();
     mpp.mjpeg_mode(w, h);
 
-    if (result.count("nodetect") == 0) {
-        HailoNN* hailo = new HailoNN(result["model-path"].as<std::string>());
-        NN = hailo;
-    }
+    // if (result.count("nodetect") == 0) {
+    hailo = HailoNN(result["model-path"].as<std::string>());
+        // NN = hailo;
+    // }
     if (result.count("test") == 1) { 
         std::thread test(start_test);
         test.join();
@@ -959,6 +947,7 @@ int main(int argc, char* argv[]) {
     ("ncv,noconvert", "Whether convert or not")
     ("ndc,nodecode", "Whether decode or not")
     ("t,test", "Whether to run a test pipeline or not")
+    ("d,debug", "Whether to show debug messages or not")
     ("iw,input-width", "Input width", cxxopts::value<int>()->default_value("640"))
     ("ih,input-height", "Input height", cxxopts::value<int>()->default_value("640"))
     ("dw,display-width", "Display width", cxxopts::value<int>()->default_value("640"))
