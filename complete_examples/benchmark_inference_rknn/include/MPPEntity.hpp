@@ -37,6 +37,8 @@ class MPPEntity {
 
         int try_get_frame(MppFrame* frame);
 
+        void reset();
+
         void destroy();
 
         

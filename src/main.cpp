@@ -47,33 +47,8 @@ GPIO gpio;
 cxxopts::ParseResult result;
 MPPEntity mpp;
 V4L2Camera cam_v4l2;
+DrmContext drm;
 
-void mppframe_nv12_to_rgb24(MppFrame frame,
-                            uint8_t *rgb,
-                            int rgb_stride)
-{
-    MppBuffer buffer = mpp_frame_get_buffer(frame);
-    if (!buffer) return;
-
-    int width   = mpp_frame_get_width(frame);
-    int height  = mpp_frame_get_height(frame);
-    int ystride = mpp_frame_get_hor_stride(frame);
-    int vstride = mpp_frame_get_ver_stride(frame); // обычно = height с выравниванием
-
-    uint8_t *base = (uint8_t *)mpp_buffer_get_ptr(buffer);
-    if (!base) return;
-
-    uint8_t *y_plane  = base;
-    uint8_t *uv_plane = base + ystride * vstride;
-
-    // NV12 → RGB24
-    libyuv::NV12ToRGB24(
-        y_plane,  ystride,
-        uv_plane, ystride,
-        rgb,      rgb_stride,
-        width,    height
-    );
-}
 
 static const char *mpp_fmt_to_str(MppFrameFormat fmt_id)
 {
@@ -184,53 +159,87 @@ static void dump_mpp_frame_to_file(MppFrame frame, FILE *fp)
     }
 }
 
-int dump_dmabuf_rgb24_to_file(int dma_fd,
-                              int width,
-                              int height,
-                              int stride,          // bytes per line in buffer
-                              const char *path)
-{
-    if (dma_fd < 0 || !path)
-        return -1;
 
-    // Проверка: stride должен быть не меньше width*3
-    if (stride < width * 3) {
-        fprintf(stderr,
-                "dump_dmabuf_rgb24_to_file: stride (%d) < width*3 (%d)\n",
-                stride, width * 3);
+int append_mpp_frame_as_nv12(FILE *fp, MppFrame frame) {
+    if (!fp || !frame) {
+        std::cerr << "append_mpp_frame_as_nv12: invalid argument\n";
         return -1;
     }
 
-    size_t map_len = static_cast<size_t>(stride) * height;
-
-    void *addr = mmap(nullptr, map_len, PROT_READ, MAP_SHARED, dma_fd, 0);
-    if (addr == MAP_FAILED) {
-        fprintf(stderr, "mmap failed: %s\n", std::strerror(errno));
+    MppBuffer buffer = mpp_frame_get_buffer(frame);
+    if (!buffer) {
+        std::cerr << "append_mpp_frame_as_nv12: frame has no buffer\n";
         return -1;
     }
 
-    FILE *fp = std::fopen(path, "wb");
-    if (!fp) {
-        fprintf(stderr, "fopen(%s) failed: %s\n", path, std::strerror(errno));
-        munmap(addr, map_len);
+    void *ptr = mpp_buffer_get_ptr(buffer);
+    if (!ptr) {
+        std::cerr << "append_mpp_frame_as_nv12: buffer ptr is null\n";
         return -1;
     }
 
-    uint8_t *base = static_cast<uint8_t *>(addr);
+    const RK_U32 width      = mpp_frame_get_width(frame);
+    const RK_U32 height     = mpp_frame_get_height(frame);
+    const RK_U32 hor_stride = mpp_frame_get_hor_stride(frame);
+    const RK_U32 ver_stride = mpp_frame_get_ver_stride(frame);
+    const RK_U32 fmt        = mpp_frame_get_fmt(frame);
 
-    // Пишем построчно: игнорируем паддинг по stride, берём только width*3 байт
-    for (int y = 0; y < height; ++y) {
-        uint8_t *line = base + y * stride;
-        std::fwrite(line, 1, width * 3, fp);
+    const uint8_t *base = static_cast<const uint8_t *>(ptr);
+
+    // ---- Layout assumptions for semi-planar formats ----
+    // Y plane:  hor_stride * ver_stride
+    // UV plane starts right after Y plane
+    const uint8_t *src_y  = base;
+    const uint8_t *src_uv = base + hor_stride * ver_stride;
+
+    // 1) Write Y plane to output as tightly packed width x height
+    for (RK_U32 y = 0; y < height; ++y) {
+        const uint8_t *row = src_y + y * hor_stride;
+        if (fwrite(row, 1, width, fp) != width) {
+            std::cerr << "append_mpp_frame_as_nv12: failed to write Y plane\n";
+            return -1;
+        }
     }
 
-    std::fclose(fp);
-    munmap(addr, map_len);
+    // 2) Write UV plane in NV12
+    // Supported inputs:
+    // - MPP_FMT_YUV420SP  (already NV12-like layout)
+    // - MPP_FMT_YUV422SP  (NV16 -> convert to NV12)
+    if (fmt == MPP_FMT_YUV420SP) {
+        // Already UV interleaved with half vertical resolution
+        for (RK_U32 y = 0; y < height / 2; ++y) {
+            const uint8_t *row = src_uv + y * hor_stride;
+            if (fwrite(row, 1, width, fp) != width) {
+                std::cerr << "append_mpp_frame_as_nv12: failed to write UV plane\n";
+                return -1;
+            }
+        }
+    } else if (fmt == MPP_FMT_YUV422SP) {
+        // NV16 -> NV12
+        // In NV16, UV is interleaved and has full vertical resolution.
+        // For NV12, UV must have half vertical resolution.
+        // We'll average every two UV rows.
+        std::vector<uint8_t> uv_row(width);
 
-    fprintf(stderr,
-            "RGB24 dump done: %s (%dx%d, stride=%d, size=%zu bytes)\n",
-            path, width, height, stride,
-            static_cast<size_t>(width) * height * 3);
+        for (RK_U32 y = 0; y < height / 2; ++y) {
+            const uint8_t *row0 = src_uv + (2 * y + 0) * hor_stride;
+            const uint8_t *row1 = src_uv + (2 * y + 1) * hor_stride;
+
+            for (RK_U32 x = 0; x < width; ++x) {
+                uv_row[x] = static_cast<uint8_t>(
+                    (static_cast<unsigned>(row0[x]) + static_cast<unsigned>(row1[x])) / 2
+                );
+            }
+
+            if (fwrite(uv_row.data(), 1, width, fp) != width) {
+                std::cerr << "append_mpp_frame_as_nv12: failed to write converted UV plane\n";
+                return -1;
+            }
+        }
+    } else {
+        std::cerr << "append_mpp_frame_as_nv12: unsupported MPP format: " << fmt << "\n";
+        return -1;
+    }
 
     return 0;
 }
@@ -433,8 +442,6 @@ void start_convert() {
         
         conv_index++;
 
-        
-
         STOP
     }
 }
@@ -482,6 +489,14 @@ void start_capture(AICamera* cam_ptr) {
     }
     
 }
+
+void destroy_application() {
+    
+    cam_v4l2.destroy();
+    mpp.destroy();
+    // drm_destroy();
+
+}
 void start_inference_dmabuf() {
 
     while (true) {
@@ -509,26 +524,30 @@ void start_draw_v4l2() {
             continue;
         }
         int fd = pic_queue_dmabuf.read().fd;
-        std::cout << "FD " << fd <<std::endl;
-        uint8_t* img = (uint8_t*)mmap(NULL, 640*640*3, PROT_READ, MAP_SHARED, fd, 0);
-        drawPicture(img, 640, 640);
-        munmap(img, 640*640*3);
+        // uint8_t* img = (uint8_t*)mmap(NULL, 640*640*3, PROT_READ, MAP_SHARED, fd, 0);
+        // drawPicture(img, 640, 640);
+        // munmap(img, 640*640*3);
+        uint32_t pitches[4] = {
+            640 * 3,   // 3 байта на пиксель
+            0, 0, 0
+        };
+        uint32_t offsets[4] = {
+            0,
+            0, 0, 0
+        };
+
+        drm_show_dmabuf(
+            drm,
+            fd,
+            640,
+            640,
+            DRM_FORMAT_BGR888,
+            pitches,
+            offsets
+        );
         draw_index++;
-        std::cout << "index " << cap_index << std::endl;
-        if (cap_index % 10 == 0){ 
-            std::cout << "DELAY: " << cap_index <<"; " << conv_index << "; " << draw_index <<"; "<< cap_index - draw_index << std::endl;
-        }
-        
-        
-        // if (result.count("nodetect") == 0) {
-        //     infer_queue.push(data);
-        //     pic_queue.remove();
-        // } else {
+
         pic_queue_dmabuf.pop();
-        // }
-        // std::cout << "size before" << pic_queue.size << std::endl; 
-        
-        // std::cout << "size after" << pic_queue.size << std::endl;
 
         STOP
     }
@@ -547,142 +566,88 @@ void start_convert_v4l2() {
         }
         auto mfqo = decoded_queue.read();
         MppFrame frame = mfqo.frame;
+    
+        rga_buffer_t src;
+        rga_buffer_t dst;
+        rga_buffer_t final_dst;
 
+        MppBuffer mpp_buffer = mpp_frame_get_buffer(frame);
+        int src_fd = mpp_buffer_get_fd(mpp_buffer);
 
-        MppBuffer buffer = mpp_frame_get_buffer(frame);
-        if (!buffer) {
-            printf("no buffer\n");
-            return;
-        }
+        // NV12 WIDTHxHEIGHT dma-buffer Image
 
-        void* base = mpp_buffer_get_ptr(buffer);
-        if (!base) {
-            printf("no ptr\n");
-            return;
-        }
+        src = wrapbuffer_fd_t(
+            src_fd,
+            mpp_frame_get_width(frame), 
+            mpp_frame_get_height(frame), 
+            mpp_frame_get_hor_stride(frame), 
+            mpp_frame_get_ver_stride(frame), 
+            RK_FORMAT_YCbCr_420_SP);
 
-        size_t size = mpp_buffer_get_size(buffer);
+        DMAPoolBufferObject dst_buffer = nv12_pool.capture();
 
-        printf("buffer ptr=%p size=%zu\n", base, size);
+        // NV12 640x640 dma-buffer Image
+        dst = wrapbuffer_fd(dst_buffer.fd, SIZE, SIZE, RK_FORMAT_YCbCr_420_SP);
 
-        // Теперь можно работать с памятью
-        uint8_t* data = static_cast<uint8_t*>(base);
+        IM_STATUS status = imresize(src, dst);
 
-        drawPicture(data, 1280, 720);
-
-        // int rgb_stride = width * 3;
-        // std::vector<uint8_t> rgb_buf(rgb_stride * height);
-
-        // mppframe_nv12_to_rgb24(frame, rgb_buf.data(), rgb_stride);
+        std::cout << "resized" << std::endl;
+        
         decoded_queue.pop();
-        mpp.notify_decoded();
-        // drawPicture(rgb_buf.data(), width, height);
 
-        // rga_buffer_t src;
-        // rga_buffer_t dst;
-        // rga_buffer_t final_dst;
+        DMAPoolBufferObject rgb_buffer = rgb_pool.capture();
 
-        // MppBuffer mpp_buffer = mpp_frame_get_buffer(frame);
-        // int src_fd = mpp_buffer_get_fd(mpp_buffer);
+        final_dst = wrapbuffer_fd(rgb_buffer.fd, SIZE, SIZE, RK_FORMAT_RGB_888);
 
-        // // NV12 WIDTHxHEIGHT dma-buffer Image
-
-        // src = wrapbuffer_fd_t(
-        //     src_fd,
-        //     mpp_frame_get_width(frame), 
-        //     mpp_frame_get_height(frame), 
-        //     mpp_frame_get_hor_stride(frame), 
-        //     mpp_frame_get_ver_stride(frame), 
-        //     RK_FORMAT_YCbCr_420_SP);
-
-        // DMAPoolBufferObject dst_buffer = nv12_pool.capture();
-
-        // // NV12 640x640 dma-buffer Image
-        // dst = wrapbuffer_fd(dst_buffer.fd, SIZE, SIZE, RK_FORMAT_YCbCr_420_SP);
-
-        // IM_STATUS status = imresize(src, dst);
-
-        // std::cout << "resized" << std::endl;
+        status = imcvtcolor(dst, final_dst, RK_FORMAT_YCbCr_420_SP, RK_FORMAT_RGB_888);
         
+        std::cout << "converted" << std::endl;
+
+        dst_buffer.release();
+        pic_queue_dmabuf.push(rgb_buffer);
         
-        // decoded_queue.pop();
-        // mpp.notify_decoded();
-
-        // DMAPoolBufferObject rgb_buffer = rgb_pool.capture();
-
-        // final_dst = wrapbuffer_fd(rgb_buffer.fd, SIZE, SIZE, RK_FORMAT_RGB_888);
-
-        // status = imcvtcolor(dst, final_dst, RK_FORMAT_YCbCr_420_SP, RK_FORMAT_RGB_888);
-        
-        // std::cout << "converted" << std::endl;
-
-        // // dump_dmabuf_rgb24_to_file(rgb_buffer.fd, 640, 640, final_dst.wstride * 3, "out.rgb");
-
-        // dst_buffer.release();
-        // pic_queue_dmabuf.push(rgb_buffer);
-        
-        
-
     }
     
 }
 
 void start_decode() {
 
+    // FILE *nv12_file = fopen("video_nv12.yuv", "wb");
+    // if (!nv12_file) {
+    //     perror("fopen video_nv12.yuv");
+    //     return;
+    // }
+
     while (true) {
         
         STOP
-        if (v4l2_queue.size == 0) {
+        if (v4l2_queue.size <= 2) {
             continue;
         }
         DMABufferQueueObject dbqo = v4l2_queue.read();
         MppFrame frame = NULL;
-        // std::cout << "real fd " << dbqo.real_fd << std::endl;
-        // std::cout << "used " << dbqo.buf->bytesused << std::endl;
-        int ret = mpp.mjpeg_decode(dbqo.real_fd, dbqo.buf->bytesused, &frame, w, h);
-        // std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (ret == -1) {
-            stop = 1;
-            break;
-        }
-        if (ret == 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            std::cout << "waiting for buffers to be released" << std::endl;
-            continue;
-        }
-
-        // MppBuffer buffer = mpp_frame_get_buffer(frame);
-        // if (!buffer) {
-        //     printf("no buffer\n");
-        //     return;
+      
+        int ret = mpp.mjpeg_decode(cam_v4l2.pointers[  dbqo.buf->index ], dbqo.buf->bytesused, &frame, w, h);
+        // std::cout << "DECODED" << std::endl;
+        // if (ret == -1) {
+        //     stop = 1;
+        //     break;
         // }
-
-        // void* base = mpp_buffer_get_ptr(buffer);
-        // if (!base) {
-        //     printf("no ptr\n");
-        //     return;
-        // }
-
-        // size_t size = mpp_buffer_get_size(buffer);
-
-        // printf("buffer ptr=%p size=%zu\n", base, size);
-
-        // // Теперь можно работать с памятью
-        // uint8_t* data = static_cast<uint8_t*>(base);
-
-        // drawPicture(data, 1280, 720);
-
-        // mpp_buffer_put(buffer);
-        // mpp_frame_deinit(&frame);
 
         v4l2_queue.pop();
 
-        decoded_queue.push(frame);
+        
+        // if (append_mpp_frame_as_nv12(nv12_file, frame) != 0) {
+        //     std::cerr << "failed to append frame to nv12 file\n";
+        // }
 
         
         
+        decoded_queue.push(frame);
+        // decoded_queue.pop();
+        
     }
-    
+    // fclose(nv12_file);
 
 }
 
@@ -701,6 +666,9 @@ void start_capture_v4l2() {
                 stop = 1;
                 break;
             }
+        }
+        if (v4l2_queue.size >= 4) {
+            continue;
         }
         struct v4l2_buffer* v4l2buf = new struct v4l2_buffer();
 
@@ -731,121 +699,90 @@ void start_capture_v4l2() {
 }
 
 void start_test( ) {
+
+
+    FILE *nv12_file = fopen("video_nv12.yuv", "wb");
+    if (!nv12_file) {
+        perror("fopen video_nv12.yuv");
+        return;
+    }
     
     cam_v4l2.startCapture();
+    auto start = simple_now();
     int i = 0;
     while (true) {
+        STOP
+        std::cout << i <<std::endl;
         if (COUNT != 0) {
             if (i == COUNT) {
                 stop = 1;
                 break;
             }
         }
-        // 1. Вытягиваем один буфер из V4L2
-        struct v4l2_buffer v4l2buf = {};
-        v4l2buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        v4l2buf.memory = V4L2_MEMORY_MMAP;
 
-        if (ioctl(cam_v4l2.fd, VIDIOC_DQBUF, &v4l2buf) < 0) {
+        struct v4l2_buffer* v4l2buf = new struct v4l2_buffer();
+
+        v4l2buf->type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        v4l2buf->memory = V4L2_MEMORY_MMAP;
+
+
+        if (ioctl(cam_v4l2.fd, VIDIOC_DQBUF, v4l2buf) < 0) {
             perror("VIDIOC_DQBUF");
-            continue;
         }
 
-        int index    = v4l2buf.index;
+
+        int index    = v4l2buf->index;
         int dma_fd   = cam_v4l2.buffers[index];
-        int used     = v4l2buf.bytesused;
+        void* ptr = cam_v4l2.pointers[index];
+        int used     = v4l2buf->bytesused;
         int total    = cam_v4l2.sizes[index];
 
+        auto end = simple_now();
+        Duration dur = end - start;
+        start = end;
+        std::this_thread::sleep_for(std::chrono::milliseconds( (int)( 1000.0 / FPS - dur.count())));
 
-        std::cout << "frame: index=" << index
-                << " fd=" << dma_fd
-                << " used=" << used
-                << " total=" << total << std::endl;
-
-        RK_U32 hor_stride = MPP_ALIGN(w, 16);
-        RK_U32 ver_stride = MPP_ALIGN(h, 16);
-
-        std::cout << "horizontal stride = " << hor_stride << std::endl;
-        std::cout << "vertical stride = " << ver_stride << std::endl;
-
-        MppBuffer pkt_buf;
-        MppBufferInfo info;
-        memset(&info, 0, sizeof(info));
-        info.type  = MPP_BUFFER_TYPE_DMA_HEAP;
-        info.size  = used;
-        info.fd    = dma_fd;
-        info.index = 1;
-
-        int ret = mpp_buffer_import(&pkt_buf, &info);
-        if (ret) {
-            std::cout << "mpp_buffer_import failed: " << ret << std::endl;
-            return;
-        }
-
+        MppFrame frame = NULL;
+      
+        int ret = mpp.mjpeg_decode(ptr, used, &frame, w, h);
         
-        MppFrame  frame     = NULL;
-        MppBuffer frm_buf   = NULL;
-        ret = mpp_frame_init(&frame); /* output frame */
-        if (ret) {
-            printf("mpp_frame_init failed\n");
-            return;
-        }
-
-        
-
-        ret = mpp_buffer_get(mpp.output_group, &frm_buf, hor_stride * ver_stride * 4);
-        if (ret) {
-            printf("failed to get buffer for input frame ret %d\n", ret);
-            return;
-        }
-
-        mpp_frame_set_buffer(frame, frm_buf);
-
-        MppPacket packet;
-        mpp_packet_init_with_buffer(&packet, pkt_buf);
-
-        //// Important! ////    ////
-        MppMeta meta = mpp_packet_get_meta(packet);
-        if (meta)
-            mpp_meta_set_frame(meta, KEY_OUTPUT_FRAME, frame);
-        ////    ////    ////    ////    
-
-        ret = mpp.mpi->decode_put_packet(mpp.ctx, packet);
-        if (ret) {
-            printf("%p mpp decode put packet failed ret %d\n", mpp.ctx, ret);
-        }
-        MppFrame frame_ret = NULL;
-        std::cout << "decoding " << std::endl;
-
-        ret = mpp.mpi->decode_get_frame(mpp.ctx, &frame_ret);
-        std::this_thread::sleep_for(std::chrono::milliseconds( 80));
-        if (ret || !frame_ret) {
-            printf("%p mpp decode get frame failed ret %d frame %p\n", mpp.ctx, ret, frame_ret);
-            return;
-        }
-        std::cout << "DECODED " << std::endl;
-        std::cout << frame_ret << std::endl;
-        FILE *fp = fopen("out.yuv", "wb"); 
-        dump_mpp_frame_to_file(frame_ret, fp);
-        std::cout << "dump" << std::endl;
-        fclose(fp);
-        mpp_buffer_put(mpp_frame_get_buffer(frame));
-        mpp_frame_deinit(&frame);
         if (ioctl(cam_v4l2.fd, VIDIOC_QBUF, v4l2buf) < 0) {
             perror("VIDIOC_QBUF");
         }
+
+        delete[] v4l2buf;
+
+        if (ret == -1) {
+            stop = 1;
+            MppBuffer frm_buf = mpp_frame_get_buffer(frame);
+            mpp_buffer_put(frm_buf);
+            mpp_frame_deinit(&frame);
+           
+            break;
+        }
+
+
+        if (append_mpp_frame_as_nv12(nv12_file, frame) != 0) {
+            std::cerr << "failed to append frame to nv12 file\n";
+        }
+
+        MppBuffer frm_buf = mpp_frame_get_buffer(frame);
+        mpp_buffer_put(frm_buf);
+        mpp_frame_deinit(&frame);
+        
         i++;
-        // stop = 1;
-        // break;
    
     }
+    destroy_application();
+    fclose(nv12_file);
 
 }
 
 void start_pipeline_for_v4l2_camera() {
 
-    int drm_fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
-    drm_init();
+    
+    drm_init(drm);
+    
 
     signal(SIGINT, sigint_handler);
 
@@ -879,38 +816,50 @@ void start_pipeline_for_v4l2_camera() {
         std::thread test(start_test);
         test.join();
         cam_v4l2.destroy();
-
-        drm_destroy();
+        mpp.destroy();
+        // drm_destroy();
+        return;
     } else { 
     
         auto start = std::chrono::high_resolution_clock::now();
         std::thread capture_thread(start_capture_v4l2);
-        std::thread decode_thread(start_decode);
-        std::thread convert_thread(start_convert_v4l2);
-        
 
+        std::thread decode_thread;
+        if (result.count("nodecode") == 0) { 
+            decode_thread = std::thread(start_decode);
+        }
+
+        std::thread convert_thread;
+        if (result.count("noconvert") == 0) { 
+            convert_thread = std::thread(start_convert_v4l2);
+        }
 
         std::thread draw_thread;
         if (result.count("nodisplay") == 0) { 
             draw_thread = std::thread(start_draw_v4l2);
         }
-        // std::thread inference_thread;
-        // if (result.count("nodetect") == 0) {
-        //     inference_thread = std::thread(start_inference_dmabuf);
-        // }
-
+        std::thread inference_thread;
+        if (result.count("nodetect") == 0) {
+            inference_thread = std::thread(start_inference_dmabuf);
+        }
 
         capture_thread.join();
-        decode_thread.join();
-        convert_thread.join();
+        
+        if (result.count("nodecode") == 0) { 
+            decode_thread.join();
+        }
+
+        if (result.count("noconvert") == 0) { 
+            convert_thread.join();
+        }
 
         if (result.count("nodisplay") == 0) { 
             draw_thread.join();
         }
         
-        // if (result.count("nodetect") == 0) {
-        //     inference_thread.join();
-        // }
+        if (result.count("nodetect") == 0) {
+            inference_thread.join();
+        }
         
         auto end = std::chrono::high_resolution_clock::now();
 
@@ -918,8 +867,8 @@ void start_pipeline_for_v4l2_camera() {
 
         std::cout << "AVERAGE FPS = " << count / (dura.count() / 1000) << std::endl;
         cam_v4l2.destroy();
-
         drm_destroy();
+        mpp.destroy();
     }
 }
 
@@ -1007,6 +956,8 @@ int main(int argc, char* argv[]) {
     ("nr,noresize", "Whether resize or not")
     ("nds,nodisplay", "Whether display or not")
     ("ndt,nodetect", "Whether detect or not")
+    ("ncv,noconvert", "Whether convert or not")
+    ("ndc,nodecode", "Whether decode or not")
     ("t,test", "Whether to run a test pipeline or not")
     ("iw,input-width", "Input width", cxxopts::value<int>()->default_value("640"))
     ("ih,input-height", "Input height", cxxopts::value<int>()->default_value("640"))

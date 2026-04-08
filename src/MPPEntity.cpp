@@ -31,14 +31,15 @@ int MPPEntity::init() {
         std::cout << "malloc failed" << std::endl;
         return -1;
     }
+    
 
-    ret = mpp_buffer_group_get_external(&input_group, MPP_BUFFER_TYPE_ION);
-    if (ret) {
-        std::cout << "mpp_buffer_group_get_external failed: " << ret << std::endl;
-        return -1;
-    }
+    // ret = mpp_buffer_group_get_external(&input_group, MPP_BUFFER_TYPE_ION);
+    // if (ret) {
+    //     std::cout << "mpp_buffer_group_get_external failed: " << ret << std::endl;
+    //     return -1;
+    // }
 
-    MppFrameFormat out_fmt = MPP_FMT_RGB888; // NV12
+    MppFrameFormat out_fmt = MPP_FMT_YUV420SP; // NV12
     mpi->control(ctx, MPP_DEC_SET_OUTPUT_FORMAT, &out_fmt);
 
     mpp_set_log_level(3);
@@ -233,12 +234,20 @@ int MPPEntity::mjpeg_mode(int w, int h) {
     RK_U32 ver_stride = MPP_ALIGN(h, 16);
 
     // mpp_buffer_group_get_external(&output_group, MPP_BUFFER_TYPE_DMA_HEAP);
-    mpp_buffer_group_get_internal(&output_group, MPP_BUFFER_TYPE_ION);
-    MPP_RET ret = mpp_buffer_group_limit_config(output_group, hor_stride * ver_stride * 4, 30);
+    MPP_RET ret = mpp_buffer_group_get_internal(&output_group, MPP_BUFFER_TYPE_ION);
+    if (ret) {
+        mpp_err_f("get mpp internal buffer group failed ret %d\n", ret);
+        return -1;
+    }
+    ret = mpp_buffer_group_limit_config(output_group, hor_stride * ver_stride * 4, 30);
     if (!output_group) {
         printf("failed to get buffer output_group for input frame ret %d\n", ret);
         return -1;
     }
+
+    ret = mpi->control(ctx, MPP_DEC_SET_EXT_BUF_GROUP, output_group);
+    if (ret) return ret;
+    mpp_buffer_group_get_internal(&input_group, MPP_BUFFER_TYPE_ION);
 
     // int buffer_count = 10;
     // int heap_fd = open("/dev/dma_heap/system", O_RDWR);
@@ -293,37 +302,36 @@ int MPPEntity::mjpeg_mode(int w, int h) {
     // }
 
     
-    mpp_buffer_group_get_internal(&input_group, MPP_BUFFER_TYPE_ION);
+    
 
 }
 
-int MPPEntity::mjpeg_decode(int fd, int size, MppFrame* out_frame, int w, int h) {
-        if (decoded_count == 30) {
-            return 1;
-        }
-        MppBuffer pkt_buf;
-        MppBufferInfo info;
-        memset(&info, 0, sizeof(info));
-        info.type  = MPP_BUFFER_TYPE_DMA_HEAP;
-        info.size  = size;
-        info.fd    = fd;
-        info.index = 1;
-        // std::cout << "importing buffer" << std::endl;
-        int ret = mpp_buffer_import(&pkt_buf, &info);
-        if (ret) {
-            std::cout << "mpp_buffer_import failed: " << ret << std::endl;
-            return -1;
-        }
-        // std::cout << "importi succeed" << std::endl;
-        if (ret) {
-            std::cout << "mpp_buffer_import failed: " << ret << std::endl;
-            return -1;
-        }
+int MPPEntity::mjpeg_decode(void* ptr, int size, MppFrame* out_frame, int w, int h) {
 
+        MppBuffer pkt_buf;
+        // MppBufferInfo info;
+        // memset(&info, 0, sizeof(info));
+        // info.type  = MPP_BUFFER_TYPE_DMA_HEAP;
+        // info.size  = size;
+        // info.fd    = fd;
+        // int ret = mpp_buffer_import(&pkt_buf, &info);
+        // if (ret) {
+        //     std::cout << "mpp_buffer_import failed: " << ret << std::endl;
+        //     return -1;
+        // }
+
+        mpp_buffer_get(input_group, &pkt_buf, size);
+        void* buf_ptr = mpp_buffer_get_ptr(pkt_buf);
+        memcpy(buf_ptr, ptr, size);
+
+        MppPacket packet;
+        mpp_packet_init_with_buffer(&packet, pkt_buf);
+        mpp_packet_set_pos(packet, 0);
+        mpp_packet_set_length(packet, size);
         
         MppFrame  frame     = NULL;
         MppBuffer frm_buf   = NULL;
-        ret = mpp_frame_init(&frame); /* output frame */
+        int ret = mpp_frame_init(&frame); /* output frame */
         if (ret) {
             printf("mpp_frame_init failed\n");
             return -1;
@@ -331,7 +339,6 @@ int MPPEntity::mjpeg_decode(int fd, int size, MppFrame* out_frame, int w, int h)
 
         RK_U32 hor_stride = MPP_ALIGN(w, 16);
         RK_U32 ver_stride = MPP_ALIGN(h, 16);
-
         
         ret = mpp_buffer_get(output_group, &frm_buf, hor_stride * ver_stride * 4);
         if (ret) {
@@ -341,36 +348,64 @@ int MPPEntity::mjpeg_decode(int fd, int size, MppFrame* out_frame, int w, int h)
 
         mpp_frame_set_buffer(frame, frm_buf);
 
-        MppPacket packet;
-        mpp_packet_init_with_buffer(&packet, pkt_buf);
+        MppTask task_in = nullptr;
 
-        //// Important! ////    ////
-        MppMeta meta = mpp_packet_get_meta(packet);
-        if (meta)
-            mpp_meta_set_frame(meta, KEY_OUTPUT_FRAME, frame);
-        ////    ////    ////    ////    
+        ret = mpi->poll(ctx, MPP_PORT_INPUT, MPP_POLL_BLOCK);
+        if (ret) return ret;
 
-        ret = mpi->decode_put_packet(ctx, packet);
-        if (ret) {
-            printf("%p mpp decode put packet failed ret %d\n", ctx, ret);
+        ret = mpi->dequeue(ctx, MPP_PORT_INPUT, &task_in);
+        if (ret || !task_in) return -1;
+
+        mpp_task_meta_set_packet(task_in, KEY_INPUT_PACKET, packet);
+        mpp_task_meta_set_frame(task_in, KEY_OUTPUT_FRAME, frame);
+
+        ret = mpi->enqueue(ctx, MPP_PORT_INPUT, task_in);
+        if (ret) return ret;
+
+        MppTask task_out = nullptr;
+
+        ret = mpi->poll(ctx, MPP_PORT_OUTPUT, MPP_POLL_BLOCK);
+        if (ret) return ret;
+
+        ret = mpi->dequeue(ctx, MPP_PORT_OUTPUT, &task_out);
+        if (ret || !task_out) return -1;
+
+        MppFrame decoded = nullptr;
+        mpp_task_meta_get_frame(task_out, KEY_OUTPUT_FRAME, &decoded);
+
+        if (!decoded) {
+            mpi->enqueue(ctx, MPP_PORT_OUTPUT, task_out);
             return -1;
         }
-        MppFrame frame_ret = NULL;
-        std::cout << "decoding " << std::endl;
 
-        ret = mpi->decode_get_frame(ctx, &frame_ret);
-        int fmt_raw = mpp_frame_get_fmt(frame);
-        int fmt_id  = fmt_raw & MPP_FRAME_FMT_COLOR_MASK;
-        fprintf(stderr, "got frame fmt_id=%d\n", (fmt_raw));
-        if (ret || !frame_ret) {
-            printf("%p mpp decode get frame failed ret %d frame %p\n", ctx, ret, frame_ret);
+        if (mpp_frame_get_errinfo(decoded)) {
+            std::cout << "Frame corrupted" << std::endl;
+            std::cout << "errinfo      = " << mpp_frame_get_errinfo(decoded) << std::endl;
+            std::cout << "discard      = " << mpp_frame_get_discard(decoded) << std::endl;
+            std::cout << "info_change  = " << mpp_frame_get_info_change(decoded) << std::endl;
+            std::cout << "width        = " << mpp_frame_get_width(decoded) << std::endl;
+            std::cout << "height       = " << mpp_frame_get_height(decoded) << std::endl;
+            std::cout << "hor_stride   = " << mpp_frame_get_hor_stride(decoded) << std::endl;
+            std::cout << "ver_stride   = " << mpp_frame_get_ver_stride(decoded) << std::endl;
+            std::cout << "buf_size     = " << mpp_frame_get_buf_size(decoded) << std::endl;
+            std::cout << "fmt          = " << mpp_frame_get_fmt(decoded) << std::endl;
             return -1;
         }
-        decoded_count++;
-        *out_frame = frame_ret;
-        frame_ret = NULL;
-        std::cout << "DECODED " << std::endl;
-        std::cout << out_frame << std::endl;
+
+        if (mpp_frame_get_info_change(decoded)) {
+            std::cout << "Frame info change" << std::endl;
+            return -1;
+        }
+
+        mpp_buffer_put(pkt_buf);
+        mpp_packet_deinit(&packet);
+        
+
+        *out_frame = decoded;
+
+        ret = mpi->enqueue(ctx, MPP_PORT_OUTPUT, task_out);
+        if (ret) return ret;
+
         return 0;
 
 }
@@ -379,12 +414,17 @@ void MPPEntity::notify_decoded() {
     decoded_count--;
 }
 
+void MPPEntity::destroy() {
+    mpp_destroy(ctx);
+}
+
 MppFrameQueueObject::MppFrameQueueObject(MppFrame f) {
     frame = f;
 }
 
 void MppFrameQueueObject::close() {
-    mpp_buffer_put(mpp_frame_get_buffer(frame));
+    MppBuffer frm_buf = mpp_frame_get_buffer(frame);
+    mpp_buffer_put(frm_buf);
     mpp_frame_deinit(&frame);
 }
 

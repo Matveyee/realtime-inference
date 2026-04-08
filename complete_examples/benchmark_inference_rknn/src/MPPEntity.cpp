@@ -43,6 +43,8 @@ int MPPEntity::init() {
 
 void MPPEntity::destroy() {
     mpp_destroy(ctx);
+    ctx = nullptr;
+    mpi = nullptr;
 }
 
 MPP_RET MPPEntity::handle_info_change(
@@ -72,7 +74,7 @@ MPP_RET MPPEntity::handle_info_change(
             return ret;
         }
 
-        int buffer_count = 50;
+        int buffer_count = 15;
         int heap_fd = open("/dev/dma_heap/system", O_RDWR);
         if (heap_fd < 0) {
             perror("open /dev/dma_heap/system");
@@ -298,6 +300,12 @@ int MPPEntity::try_get_frame(MppFrame* source_frame) {
 
         }
     }
+
+}
+
+void MPPEntity::reset() {
+    destroy();
+    init();
 
 }
 

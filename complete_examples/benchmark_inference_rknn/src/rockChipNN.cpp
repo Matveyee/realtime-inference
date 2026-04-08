@@ -170,6 +170,7 @@ void RockChipNN::inference_dmabuf(standart_inference_ctx* app_ctx)
     std::chrono::duration<double, std::milli> duration = end - start;
     times.push_back(duration.count());
     frames_processed++;
+    munmap(app_ctx->input_buffer, input.size);
 
     // 4. Получение выходов (как раньше)
     rknn_output* outputs =

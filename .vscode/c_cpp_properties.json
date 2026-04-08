@@ -5,6 +5,7 @@
             "includePath": [
                 "${workspaceFolder}/**",
                 "${workspaceFolder}/include",
+                // "${workspaceFolder}/complete_examples/benchmark_inference_rknn/include",
                 "${workspaceFolder}/third-party/cxxopts/include"
             ],
             "defines": [],

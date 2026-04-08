@@ -90,9 +90,9 @@ void start_inference() {
 
         standart_inference_ctx* ctx = new standart_inference_ctx();
         ctx->fd = converted_queue.read().fd;
-
+        
         rknn.inference_dmabuf(ctx);
-
+        // std::cout <<"\r" << cap_index << "; " << rknn.frames_processed << "; "<<cap_index -  rknn.frames_processed<< std::flush;
         converted_queue.pop();
 
 
@@ -109,6 +109,9 @@ void start_convert() {
         
         STOP
 
+        if (converted_queue.size >= 2) {
+            continue;
+        }
         if (decoded_queue.size == 0) {
             continue;
         }
@@ -186,9 +189,25 @@ void start_decode() {
         }
         int read_size = fread(buf, 1, PACKET_SIZE, fp);
         if (read_size <= 0) {
-            // Конец файла
-            std::cout << "Конец файла" << std::endl;
-            eos = true;
+            if (result.count("infinite") != 0) {
+                if (feof(fp)) {
+                    // std::cout << "Конец файла, restart decoder..." << std::endl;
+
+                    clearerr(fp);
+                    fseek(fp, 0, SEEK_SET);
+
+                    mpp.reset();
+                    // rknn.frames_processed = 0;
+                    // cap_index = 0;
+                    while (converted_queue.size != 0) {}
+                    while (decoded_queue.size != 0) {}
+                    continue;
+                } else {
+                    perror("fread");
+                    break;
+                }
+            }
+            
         }
        // log("putting packet");
         int ret = mpp.put_packet(buf, read_size);
@@ -200,7 +219,7 @@ void start_decode() {
         MppFrame frame;
         ret = mpp.try_get_frame(&frame);
         if (ret) {
-         //   log("no frame");
+            // std::cout << "no frame " << std::endl;
             continue;
         } else {
         //    std::cout << "In decode " << frame << std::endl;
@@ -209,12 +228,17 @@ void start_decode() {
             end = simple_now();
             Duration dur = end - start;
             start = simple_now();
-            std::cout <<"\r delay:" <<  cap_index - rknn.frames_processed << std::endl;
+            if (cap_index % 20 == 0) {
+                std::cout <<"\r status:" <<  cap_index << std::flush;
+                // std::cout << "dec " << decoded_queue.size << " conv " << converted_queue.size << std::endl;
+            }
+            
             std::this_thread::sleep_for(std::chrono::milliseconds( (int)( (1.0 / FPS) * 1000 - dur.count() ) ) );
         }
         
     }
 
+    fclose(fp);
     End = 1;
 }
 
@@ -225,6 +249,7 @@ int main(int argc, char* argv[]) {
 
     options.add_options()
     ("d,debug", "Whether show debug messages or not")
+    ("i,infinite", "Whether to run benchmark forever")
     ("iw,input-width", "Input width", cxxopts::value<int>()->default_value("640"))
     ("ih,input-height", "Input height", cxxopts::value<int>()->default_value("640"))
     ("p,model-path", "Path to .hef model", cxxopts::value<std::string>())

@@ -102,6 +102,41 @@ void drawPicture(Projection* proj, uint8_t* data);
 void drawPicture( uint8_t* data,int w, int h);
 void drawPicture(int fd, int w, int h);
 
+
+struct DrmContext {
+    int fd = -1;
+
+    drmModeRes* res = nullptr;
+    drmModeConnector* conn = nullptr;
+    drmModeCrtc* old_crtc = nullptr;
+
+    uint32_t conn_id = 0;
+    uint32_t crtc_id = 0;
+    drmModeModeInfo mode = {};
+};
+uint32_t find_plane_for_format(int drm_fd, drmModeRes* res, uint32_t crtc_id, uint32_t fourcc);
+
+bool import_dmabuf_to_fb(
+    int drm_fd,
+    int dmabuf_fd,
+    uint32_t width,
+    uint32_t height,
+    uint32_t fourcc,
+    const uint32_t pitches[4],
+    const uint32_t offsets[4],
+    uint32_t& fb_id,
+    uint32_t handles_out[4]
+);
+bool drm_show_dmabuf(
+    DrmContext& drm,
+    int dmabuf_fd,
+    uint32_t width,
+    uint32_t height,
+    uint32_t fourcc,
+    const uint32_t pitches[4],
+    const uint32_t offsets[4]
+);
+bool drm_init(DrmContext& drm);
 void drm_init();
 void drm_destroy();
 

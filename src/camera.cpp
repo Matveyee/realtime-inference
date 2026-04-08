@@ -130,7 +130,7 @@ int V4L2Camera::setResolution(int w, int h) {
     }
 
     struct v4l2_requestbuffers req = {0};
-    req.count = 10;
+    req.count = N;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
     if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
@@ -167,6 +167,10 @@ int V4L2Camera::setResolution(int w, int h) {
 
         buffers[i] = exp_buf.fd;
         sizes[i] = buf.length;
+        pointers[i] = mmap(NULL, sizes[i] , PROT_READ, MAP_SHARED, buffers[i], 0);
+        if (!pointers[i]) {
+            std::cout << "nullptr" << std::endl;
+        }
         if(ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
             perror("VIDIOC_QBUF");
             return 1;

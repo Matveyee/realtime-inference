@@ -1,0 +1,233 @@
+#include "camera.hpp"
+#include "relay.hpp"
+// #include "../include/modbus.hpp"
+#include "cxxopts.hpp"
+#include "GxIAPI.h"
+#include "DxImageProc.h"
+#include "hailoNN.hpp"
+#include "rockChipNN.hpp"
+#include "utils.hpp"
+#include "rga/RgaUtils.h"
+#include "rga/im2d.h"
+#include "rga/rga.h"
+#include "gpio.hpp"
+#include <thread>
+#include "queue.hpp"
+#include <csignal>
+#include <linux/dma-heap.h>
+#include "MPPEntity.hpp"
+#include "Pool.hpp"
+#include "libyuv.h"
+#define RED     "\033[31m"
+#define GREEN   "\033[32m"
+#define YELLOW  "\033[33m"
+#define BLUE    "\033[34m"
+#define RESET   "\033[0m"
+
+
+static const char *mpp_fmt_to_str(MppFrameFormat fmt_id)
+{
+    switch (fmt_id) {
+    case MPP_FMT_YUV420SP:     return "YUV420SP (NV12)";
+    case MPP_FMT_YUV420SP_VU:  return "YUV420SP_VU (NV21)";
+    case MPP_FMT_YUV420P:      return "YUV420P (I420)";
+    case MPP_FMT_YUV422SP:     return "YUV422SP (NV16)";
+    case MPP_FMT_YUV422P:      return "YUV422P";
+    default:                   return "OTHER";
+    }
+}
+
+static void dump_mpp_frame_to_file(MppFrame frame, FILE *fp)
+{
+    if (!frame || !fp)
+        return;
+
+    MppBuffer buffer = mpp_frame_get_buffer(frame);
+    if (!buffer)
+        return;
+
+    int width    = mpp_frame_get_width(frame);
+    int height   = mpp_frame_get_height(frame);
+    int hstride  = mpp_frame_get_hor_stride(frame);
+    int vstride  = mpp_frame_get_ver_stride(frame);
+    size_t bufsz = mpp_buffer_get_size(buffer);
+
+    MppFrameFormat fmt_full = static_cast<MppFrameFormat>(mpp_frame_get_fmt(frame));
+    MppFrameFormat fmt_id = static_cast<MppFrameFormat>(fmt_full & MPP_FRAME_FMT_MASK);
+
+    uint8_t *base = (uint8_t *)mpp_buffer_get_ptr(buffer);
+    if (!base)
+        return;
+
+    fprintf(stderr,
+            "Dump frame: %dx%d, hstride=%d, vstride=%d, fmt_full=%d, fmt_id=%d (%s), buf=%zu\n",
+            width, height, hstride, vstride,
+            fmt_full, fmt_id, mpp_fmt_to_str(fmt_id), bufsz);
+
+    switch (fmt_id) {
+    case MPP_FMT_YUV420SP:          // NV12
+    case MPP_FMT_YUV420SP_VU:      // NV21 (раскладка та же, только порядок U/V другой)
+    {
+        uint8_t *y_plane  = base;
+        uint8_t *uv_plane = base + hstride * vstride;
+
+        // Y: height строк по width байт
+        for (int y = 0; y < height; y++) {
+            fwrite(y_plane + y * hstride, 1, width, fp);
+        }
+
+        // UV/VU: height/2 строк по width байт
+        for (int y = 0; y < height / 2; y++) {
+            fwrite(uv_plane + y * hstride, 1, width, fp);
+        }
+
+        break;
+    }
+
+    case MPP_FMT_YUV420P:          // планарный 4:2:0
+    {
+        uint8_t *y_plane = base;
+        uint8_t *u_plane = y_plane + hstride * vstride;
+        uint8_t *v_plane = u_plane + (hstride / 2) * (vstride / 2);
+
+        // Y
+        for (int y = 0; y < height; y++) {
+            fwrite(y_plane + y * hstride, 1, width, fp);
+        }
+        // U
+        for (int y = 0; y < height / 2; y++) {
+            fwrite(u_plane + y * (hstride / 2), 1, width / 2, fp);
+        }
+        // V
+        for (int y = 0; y < height / 2; y++) {
+            fwrite(v_plane + y * (hstride / 2), 1, width / 2, fp);
+        }
+
+        break;
+    }
+
+    case MPP_FMT_YUV422SP:         // NV16: Y full + interleaved UV full
+    {
+        uint8_t *y_plane  = base;
+        uint8_t *uv_plane = base + hstride * vstride;
+
+        // Y: height строк по width байт
+        for (int y = 0; y < height; y++) {
+            fwrite(y_plane + y * hstride, 1, width, fp);
+        }
+
+        // UV: height строк по width байт (4:2:2 → вертикального подвыборa нет)
+        for (int y = 0; y < height; y++) {
+            fwrite(uv_plane + y * hstride, 1, width, fp);
+        }
+
+        break;
+    }
+
+    default:
+    {
+        // на крайний случай – выводим предупреждение и НЕ дампим весь буфер,
+        // чтобы не получать странные размеры
+        fprintf(stderr, "Unsupported format %d, skip dump\n", fmt_id);
+        break;
+    }
+    }
+}
+
+int main(int argc, char* argv[] ) {
+
+    int w = 1280;
+    int h = 720;
+
+    MPPEntity mpp;
+    mpp.init();
+    mpp.mjpeg_mode(w,h);
+    FILE *file = fopen(argv[1], "rb"); 
+
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+
+    RK_U32 hor_stride = MPP_ALIGN(w, 16);
+    RK_U32 ver_stride = MPP_ALIGN(h, 16);
+
+    MppBuffer pkt_buf;
+
+    int ret = mpp_buffer_get(NULL, &pkt_buf, size);
+
+    void* ptr = mpp_buffer_get_ptr(pkt_buf);
+
+    int read_size = fread(ptr, 1, size, file);
+    std::cout << "REAL SIZE " << size <<std::endl;
+    std::cout << "READ SIZE " << read_size <<std::endl;
+
+    MppPacket packet;
+    mpp_packet_init_with_buffer(&packet, pkt_buf);
+
+    MppFrame out_frame = nullptr;
+    ret = mpp_frame_init(&out_frame);
+    if (ret) return ret;
+
+    MppBuffer out_buf = nullptr;
+    size_t out_size = MPP_ALIGN(w,16) * MPP_ALIGN(h,16) * 4; // стартовая оценка
+    ret = mpp_buffer_get(mpp.output_group, &out_buf, out_size);
+    if (ret) return ret;
+
+    mpp_frame_set_buffer(out_frame, out_buf);
+
+    MppTask task_in = nullptr;
+
+    ret = mpp.mpi->poll(mpp.ctx, MPP_PORT_INPUT, MPP_POLL_BLOCK);
+    if (ret) return ret;
+
+    ret = mpp.mpi->dequeue(mpp.ctx, MPP_PORT_INPUT, &task_in);
+    if (ret || !task_in) return -1;
+
+    mpp_task_meta_set_packet(task_in, KEY_INPUT_PACKET, packet);
+    mpp_task_meta_set_frame(task_in, KEY_OUTPUT_FRAME, out_frame);
+
+    ret = mpp.mpi->enqueue(mpp.ctx, MPP_PORT_INPUT, task_in);
+    if (ret) return ret;
+
+    MppTask task_out = nullptr;
+
+    ret = mpp.mpi->poll(mpp.ctx, MPP_PORT_OUTPUT, MPP_POLL_BLOCK);
+    if (ret) return ret;
+
+    ret = mpp.mpi->dequeue(mpp.ctx, MPP_PORT_OUTPUT, &task_out);
+    if (ret || !task_out) return -1;
+
+    MppFrame decoded = nullptr;
+    mpp_task_meta_get_frame(task_out, KEY_OUTPUT_FRAME, &decoded);
+    std::cout << "errinfo      = " << mpp_frame_get_errinfo(decoded) << std::endl;
+    std::cout << "discard      = " << mpp_frame_get_discard(decoded) << std::endl;
+    std::cout << "info_change  = " << mpp_frame_get_info_change(decoded) << std::endl;
+    std::cout << "width        = " << mpp_frame_get_width(decoded) << std::endl;
+    std::cout << "height       = " << mpp_frame_get_height(decoded) << std::endl;
+    std::cout << "hor_stride   = " << mpp_frame_get_hor_stride(decoded) << std::endl;
+    std::cout << "ver_stride   = " << mpp_frame_get_ver_stride(decoded) << std::endl;
+    std::cout << "buf_size     = " << mpp_frame_get_buf_size(decoded) << std::endl;
+    std::cout << "fmt          = " << mpp_frame_get_fmt(decoded) << std::endl;
+    if (!decoded) {
+        mpp.mpi->enqueue(mpp.ctx, MPP_PORT_OUTPUT, task_out);
+        return -1;
+    }
+
+    if (mpp_frame_get_errinfo(decoded)) {
+    // кадр повреждён
+        std::cout << "Frame corrupted" << std::endl;
+    }
+
+    if (mpp_frame_get_info_change(decoded)) {
+        // нужно пересоздать/обновить буферный пул
+        std::cout << "Frame info change" << std::endl;
+    }
+    FILE *fp = fopen("out.yuv", "wb"); 
+    dump_mpp_frame_to_file(decoded, fp);
+
+    // обязательно вернуть task обратно
+    ret = mpp.mpi->enqueue(mpp.ctx, MPP_PORT_OUTPUT, task_out);
+    if (ret) return ret;
+
+}

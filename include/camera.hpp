@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #ifndef CAMERA.HPP
 #define CAMERA.HPP
 // Abstract class, with callback function type as a parameter
@@ -78,9 +79,11 @@ class V4L2Camera : AbstractCamera {
         V4L2Camera();
 
         struct v4l2_format fmt;
+        static const int N = 30;
         int fd;
-        int buffers[10];
-        int sizes[6];
+        int buffers[N];
+        int sizes[N];
+        void* pointers[N];
 
         int init(std::string path);
 

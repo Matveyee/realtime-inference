@@ -315,6 +315,275 @@ void drawPicture(int fd, int w, int h) {
     // current_handle = handle;
 }
 
+uint32_t find_plane_for_format(int drm_fd, drmModeRes* res, uint32_t crtc_id, uint32_t fourcc) {
+    drmModePlaneRes* plane_res = drmModeGetPlaneResources(drm_fd);
+    if (!plane_res) {
+        perror("drmModeGetPlaneResources");
+        return 0;
+    }
+
+    int crtc_index = -1;
+    for (int i = 0; i < res->count_crtcs; ++i) {
+        if (res->crtcs[i] == crtc_id) {
+            crtc_index = i;
+            break;
+        }
+    }
+
+    if (crtc_index < 0) {
+        drmModeFreePlaneResources(plane_res);
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < plane_res->count_planes; ++i) {
+        drmModePlane* plane = drmModeGetPlane(drm_fd, plane_res->planes[i]);
+        if (!plane)
+            continue;
+
+        bool crtc_ok = plane->possible_crtcs & (1u << crtc_index);
+        bool fmt_ok = false;
+
+        for (uint32_t j = 0; j < plane->count_formats; ++j) {
+            if (plane->formats[j] == fourcc) {
+                fmt_ok = true;
+                break;
+            }
+        }
+
+        uint32_t plane_id = 0;
+        if (crtc_ok && fmt_ok)
+            plane_id = plane->plane_id;
+
+        drmModeFreePlane(plane);
+
+        if (plane_id) {
+            drmModeFreePlaneResources(plane_res);
+            return plane_id;
+        }
+    }
+
+    drmModeFreePlaneResources(plane_res);
+    return 0;
+}
+
+bool import_dmabuf_to_fb(
+    int drm_fd,
+    int dmabuf_fd,
+    uint32_t width,
+    uint32_t height,
+    uint32_t fourcc,
+    const uint32_t pitches[4],
+    const uint32_t offsets[4],
+    uint32_t& fb_id,
+    uint32_t handles_out[4]
+) {
+    uint32_t handles[4] = {0, 0, 0, 0};
+
+    if (drmPrimeFDToHandle(drm_fd, dmabuf_fd, &handles[0]) != 0) {
+        perror("drmPrimeFDToHandle");
+        return false;
+    }
+
+    // Если все плоскости в одном dmabuf fd — handle обычно один и тот же.
+    handles[1] = handles[0];
+    handles[2] = handles[0];
+    handles[3] = handles[0];
+
+    if (drmModeAddFB2(
+            drm_fd,
+            width,
+            height,
+            fourcc,
+            handles,
+            const_cast<uint32_t*>(pitches),
+            const_cast<uint32_t*>(offsets),
+            &fb_id,
+            0) != 0) {
+        perror("drmModeAddFB2");
+
+        struct drm_gem_close gc = {};
+        gc.handle = handles[0];
+        drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &gc);
+        return false;
+    }
+
+    handles_out[0] = handles[0];
+    handles_out[1] = handles[1];
+    handles_out[2] = handles[2];
+    handles_out[3] = handles[3];
+    return true;
+}
+
+bool drm_init(DrmContext& drm) {
+    drm.fd = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+    if (drm.fd < 0) {
+        perror("open /dev/dri/card0");
+        return false;
+    }
+
+    drm.res = drmModeGetResources(drm.fd);
+    if (!drm.res) {
+        perror("drmModeGetResources");
+        close(drm.fd);
+        drm.fd = -1;
+        return false;
+    }
+
+    for (int i = 0; i < drm.res->count_connectors; ++i) {
+        drmModeConnector* c = drmModeGetConnector(drm.fd, drm.res->connectors[i]);
+        if (!c)
+            continue;
+
+        if (c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
+            drm.conn = c;
+            drm.conn_id = c->connector_id;
+            drm.mode = c->modes[0];
+            break;
+        }
+
+        drmModeFreeConnector(c);
+    }
+
+    if (!drm.conn_id || !drm.conn) {
+        std::cerr << "No connected display found\n";
+        return false;
+    }
+
+    drmModeEncoder* enc = nullptr;
+
+    if (drm.conn->encoder_id)
+        enc = drmModeGetEncoder(drm.fd, drm.conn->encoder_id);
+
+    if (!enc) {
+        // fallback: ищем любой encoder/CRTC
+        for (int i = 0; i < drm.conn->count_encoders; ++i) {
+            enc = drmModeGetEncoder(drm.fd, drm.conn->encoders[i]);
+            if (enc)
+                break;
+        }
+    }
+
+    if (!enc) {
+        std::cerr << "Failed to get encoder\n";
+        return false;
+    }
+
+    drm.crtc_id = enc->crtc_id;
+    drmModeFreeEncoder(enc);
+
+    if (!drm.crtc_id) {
+        std::cerr << "Failed to get CRTC\n";
+        return false;
+    }
+
+    drm.old_crtc = drmModeGetCrtc(drm.fd, drm.crtc_id);
+    if (!drm.old_crtc) {
+        perror("drmModeGetCrtc");
+        return false;
+    }
+
+    // Один раз выставим режим на экран
+    if (drmModeSetCrtc(drm.fd, drm.crtc_id, 0, 0, 0, &drm.conn_id, 1, &drm.mode) != 0) {
+        perror("drmModeSetCrtc");
+        return false;
+    }
+
+    return true;
+}
+
+bool drm_show_dmabuf(
+    DrmContext& drm,
+    int dmabuf_fd,
+    uint32_t width,
+    uint32_t height,
+    uint32_t fourcc,
+    const uint32_t pitches[4],
+    const uint32_t offsets[4]
+) {
+    if (drm.fd < 0 || !drm.res || !drm.conn || !drm.crtc_id) {
+        std::cerr << "DRM is not initialized\n";
+        return false;
+    }
+
+    uint32_t plane_id = find_plane_for_format(drm.fd, drm.res, drm.crtc_id, fourcc);
+    if (!plane_id) {
+        std::cerr << "No plane supports format " << std::hex << fourcc << std::dec << "\n";
+        return false;
+    }
+
+    uint32_t fb_id = 0;
+    uint32_t handles[4] = {0, 0, 0, 0};
+
+    if (!import_dmabuf_to_fb(
+            drm.fd,
+            dmabuf_fd,
+            width,
+            height,
+            fourcc,
+            pitches,
+            offsets,
+            fb_id,
+            handles)) {
+        return false;
+    }
+
+    int dst_x = 0;
+    int dst_y = 0;
+    int dst_w = 1920;
+    int dst_h = 1080;
+
+    int ret = drmModeSetPlane(
+        drm.fd,
+        plane_id,
+        drm.crtc_id,
+        fb_id,
+        0,
+        dst_x,
+        dst_y,
+        dst_w,
+        dst_h,
+        0 << 16,
+        0 << 16,
+        width << 16,
+        height << 16
+    );
+
+    // // Показать на весь экран
+    // int ret = drmModeSetPlane(
+    //     drm.fd,
+    //     plane_id,
+    //     drm.crtc_id,
+    //     fb_id,
+    //     0,                      // flags
+    //     0, 0,                   // crtc_x, crtc_y
+    //     drm.mode.hdisplay,      // crtc_w
+    //     drm.mode.vdisplay,      // crtc_h
+    //     0 << 16,                // src_x
+    //     0 << 16,                // src_y
+    //     width << 16,            // src_w
+    //     height << 16            // src_h
+    // );
+
+    if (ret != 0) {
+        perror("drmModeSetPlane");
+        drmModeRmFB(drm.fd, fb_id);
+
+        if (handles[0]) {
+            struct drm_gem_close gc = {};
+            gc.handle = handles[0];
+            drmIoctl(drm.fd, DRM_IOCTL_GEM_CLOSE, &gc);
+        }
+        return false;
+    }
+
+    // Важно:
+    // Пока plane использует fb_id, удалять его сразу нельзя.
+    // Если хочешь показывать следующий буфер, тогда:
+    // 1) setPlane(new_fb)
+    // 2) потом rm old fb + gem_close old handle
+
+    return true;
+}
 
 void drm_init() {
 

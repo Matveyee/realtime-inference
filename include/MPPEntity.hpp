@@ -42,7 +42,7 @@ class MPPEntity {
 
         int mjpeg_mode(int w, int h);
 
-        int mjpeg_decode(int fd, int size, MppFrame* out_frame, int w, int h);
+        int mjpeg_decode(void* ptr, int size, MppFrame* out_frame, int w, int h);
 
         void notify_decoded();
 
