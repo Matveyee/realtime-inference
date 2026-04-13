@@ -21,7 +21,6 @@ void RockChipNN::init(std::string model_path) {
 
 
 
-    // Get Model Input Output Info
     
     ret = rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
     if (ret != RKNN_SUCC) {
@@ -31,12 +30,10 @@ void RockChipNN::init(std::string model_path) {
     printf("model input num: %d, output num: %d\n", io_num.n_input, io_num.n_output);
 
     printf("input tensors:\n");
-    // rknn_tensor_attr input_attrs[io_num.n_input];
     input_attrs = (rknn_tensor_attr*)calloc(io_num.n_input, sizeof(rknn_tensor_attr));
     memset(input_attrs, 0, io_num.n_input * sizeof(rknn_tensor_attr));
     for (uint32_t i = 0; i < io_num.n_input; i++) {
         input_attrs[i].index = i;
-        // query info
         ret = rknn_query(ctx, RKNN_QUERY_INPUT_ATTR, &(input_attrs[i]), sizeof(rknn_tensor_attr));
         if (ret < 0) {
         printf("rknn_init error! ret=%d\n", ret);
@@ -65,12 +62,10 @@ void RockChipNN::init(std::string model_path) {
 
     
     printf("output tensors:\n");
-    // rknn_tensor_attr output_attrs[io_num.n_output];
     output_attrs = (rknn_tensor_attr*)calloc(io_num.n_output, sizeof(rknn_tensor_attr));
     memset(output_attrs, 0, io_num.n_output * sizeof(rknn_tensor_attr));
     for (uint32_t i = 0; i < io_num.n_output; i++) {
         output_attrs[i].index = i;
-        // query info
         ret = rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &(output_attrs[i]), sizeof(rknn_tensor_attr));
         if (ret != RKNN_SUCC) {
         printf("rknn_query fail! ret=%d\n", ret);

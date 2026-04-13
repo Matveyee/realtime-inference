@@ -1,9 +1,6 @@
 #include "../include/camera.hpp"
 
 AICamera::AICamera() {}
-// void AICamera::setCallBack(GXCaptureCallBack cllbck) {
-//     GXRegisterCaptureCallback(hDevice, NULL, cllbck);
-// }
 
 void AICamera::init() {
 
@@ -15,14 +12,12 @@ void AICamera::init() {
         return;
     }
 
-    //Updates the enumeration list for the devices.
     uint32_t nDeviceNum = 0;
     status = GXUpdateDeviceList(&nDeviceNum, 1000);
     if ((status != GX_STATUS_SUCCESS) || (nDeviceNum <= 0)) {
         std::cout << "Update list failed" << std::endl;
         return;
     }
-    //Opens the device.
     status = GXOpenDeviceByIndex(1, &hDevice);
 
     if (status != GX_STATUS_SUCCESS) {

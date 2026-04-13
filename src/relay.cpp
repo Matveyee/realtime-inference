@@ -126,7 +126,6 @@ int Relay::hexstr_to_bytes(const char *hexstr, unsigned char *out, size_t max_le
             break;
         out[count++] = (unsigned char)byte;
 
-        // Пропустить два символа и возможный пробел
         while (*hexstr && *hexstr != ' ') hexstr++;
         while (*hexstr == ' ') hexstr++;
     }
