@@ -44,6 +44,8 @@ struct NamedBbox {
     size_t class_id;
 };
 
+
+extern uint32_t plane_id;
 uint16_t modbus_crc16( const unsigned char *buf, unsigned int len );
 
 class Vec {
@@ -140,7 +142,8 @@ struct OverlayPlane {
     int dst_h = 0;
 };
 
-
+extern OverlayPlane overlay;
+extern double threshold;
 uint32_t find_plane_for_format(int drm_fd,
                                       drmModeRes* res,
                                       uint32_t crtc_id,
@@ -174,7 +177,7 @@ bool drm_create_overlay_plane(DrmContext& drm,
 
 void overlay_draw_bboxes(OverlayPlane& ovl,
                          const std::vector<NamedBbox>& boxes,
-                         float score_threshold = 0.25f,
+                         float score_threshold = 0.40f,
                          int thickness = 2);
 bool drm_init(DrmContext& drm);
 void drm_init();

@@ -167,11 +167,6 @@ void HailoNN::inference_dmabuf(standart_inference_ctx* ctx) {
             0, 0, 0
         };
 
-        uint32_t plane_id = find_plane_for_format(drm.fd, drm.res, drm.crtc_id, DRM_FORMAT_BGR888);
-        if (!plane_id) {
-            std::cerr << "No plane supports format " << std::hex << DRM_FORMAT_BGR888 << std::dec << "\n";
-            return false;
-        }
 
         drm_show_dmabuf(
             drm,
@@ -184,11 +179,8 @@ void HailoNN::inference_dmabuf(standart_inference_ctx* ctx) {
             plane_id
         );
 
-        OverlayPlane overlay;
-        drm_create_overlay_plane(drm, overlay, plane_id);
-
         // 4. Рисовать bbox
-        overlay_draw_bboxes(overlay, bboxes);
+        overlay_draw_bboxes(overlay, bboxes, threshold);
 
         delete[] ctx;
    

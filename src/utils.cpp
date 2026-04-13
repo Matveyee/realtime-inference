@@ -53,8 +53,9 @@ drmModeModeInfo mode;
 int drm_fd;
 struct drm_mode_fb_cmd fb = {};
 DrmContext drm;
-
-
+OverlayPlane overlay;
+uint32_t plane_id;
+double threshold;
 
 Vec::Vec(int p_x, int p_y) : x(p_x), y(p_y) {}
 Vec::Vec() {}

@@ -518,6 +518,8 @@ void start_inference_dmabuf() {
 }
 
 void start_draw_v4l2() {
+
+    
     while (true) {
         STOP
         if (pic_queue_dmabuf.size <= 0) {
@@ -764,18 +766,13 @@ void start_pipeline_for_v4l2_camera() {
     
     drm_init(drm);
     
-    OverlayPlane overlay;
-    int video_plane_id = find_plane_for_format(drm.fd, drm.res, drm.crtc_id, DRM_FORMAT_BGR888, 0);
-    if (!drm_create_overlay_plane(drm, overlay, video_plane_id)) {
-        std::cerr << "overlay plane create failed\n";
-    }
-
     signal(SIGINT, sigint_handler);
 
     
 
     w = result["input-width"].as<int>();
     h = result["input-height"].as<int>();
+    threshold = result["threshold"].as<double>();
     if (result.count("noresize") == 0) {
         WIDTH = result["display-width"].as<int>();
         HEIGHT = result["display-height"].as<int>();
@@ -800,6 +797,15 @@ void start_pipeline_for_v4l2_camera() {
     hailo = HailoNN(result["model-path"].as<std::string>());
         // NN = hailo;
     // }
+
+    plane_id = find_plane_for_format(drm.fd, drm.res, drm.crtc_id, DRM_FORMAT_BGR888);
+    if (!plane_id) {
+        std::cerr << "No plane supports format " << std::hex << DRM_FORMAT_BGR888 << std::dec << "\n";
+        return;
+    }
+    
+    drm_create_overlay_plane(drm, overlay, plane_id);
+
     if (result.count("test") == 1) { 
         std::thread test(start_test);
         test.join();
@@ -953,6 +959,7 @@ int main(int argc, char* argv[]) {
     ("dw,display-width", "Display width", cxxopts::value<int>()->default_value("640"))
     ("dh,display-height", "Display height", cxxopts::value<int>()->default_value("640"))
     ("p,model-path", "Path to .hef model", cxxopts::value<std::string>())
+    ("th,threshold", "Confidence threshold for the model", cxxopts::value<double>()->default_value("0.5"))
     ("cp,camera-path", "Path to v4l2 (/dev/video*) camera", cxxopts::value<std::string>())
     ("f,frame-rate", "Input frame-rate", cxxopts::value<int>()->default_value("30"))
     ("c,count", "How many frames to capture", cxxopts::value<int>()->default_value("0"));
